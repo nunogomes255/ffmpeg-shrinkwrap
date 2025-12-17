@@ -59,22 +59,25 @@ flowchart TD
 You can install this script as a system-wide command so you can run it from any folder without copying the file.
 
 **Linux / macOS / WSL:**
+
+1. Clone the repo
 ```bash
-# 1. Clone the repo
 git clone https://github.com/nunogomes255/ffmpeg-shrinkwrap.git
 cd ffmpeg-shrinkwrap
-
-# 2. Make executable
+```
+2. Make it executable
+```bash
 chmod +x ffmpeg_shrinkwrap.sh
-
-# 3. Link to your bin folder
+```
+3. Link to your bin folder
+```bash
 sudo cp ffmpeg_shrinkwrap.sh /usr/local/bin/ffmpeg-shrinkwrap
 ```
 
 **Now you can run it anywhere:**
 
 ```bash
-cd /path/to/videos
+cd /path/to/your/videos
 ffmpeg-shrinkwrap
 ```
 
