@@ -1,0 +1,10 @@
+optimized/
+*ffmpeg2pass*
+*ffmpeg_pass*
+*rescue_pass*
+*_temp_*.mp4
+*_PART_*.mp4
+*_error_*.txt
+optimization_summary.txt
+.DS_Store
+Thumbs.db
