@@ -33,17 +33,23 @@ $$b_v = \frac{(S - O) \times 8}{t} - b_a$$
 The script follows a "waterfall" strategy to preserve quality:
 
 ```mermaid
-graph TD
+flowchart TD
     A[Input Video] --> B{Calculate Bitrate}
     B --> C[Pass 1: 1080p Encode]
     C --> D{Size <= Target?}
+
     D -- Yes --> E[Success]
     D -- No --> F{Bitrate < Floor?}
-    F -- No --> B[Reduce Bitrate & Retry]
+
+    F -- No --> R[Reduce Bitrate & Retry]
+    R --> B
+
     F -- Yes --> G[Rescue Mode: 720p]
     G --> H{Size <= Target?}
+
     H -- Yes --> E
     H -- No --> I[Split Video]
+
     I --> J[Optimize Part 1]
     I --> K[Optimize Part 2]
 ```
