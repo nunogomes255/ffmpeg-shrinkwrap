@@ -6,7 +6,7 @@
 
 **A constraint-driven video compression pipeline designed for the Discord-bound.**
 
-`ffmpeg-shrinkwrap` is a Bash utility that aggressively bullies video files until they fit under strict file size limits (default: <10MB).
+`ffmpeg-shrinkwrap` is a Bash utility to **compress an entire directory of videos to 10MB** (or any target size) for Discord or other constraints. It aggressively bullies video files until they fit under strict file size limits (default: <10MB).
 
 Unlike static presets, it uses **dynamic bitrate calculation** and a **heuristic state machine** to balance quality against size constraints. It automates the "trial and error" process of encoding, retrying, downscaling, and splitting.
 
@@ -36,15 +36,20 @@ $$b_v = \frac{(S - O) \times 8}{t} - b_a$$
 The script follows a "waterfall" strategy to preserve quality:
 
 ```mermaid
-graph TD
+flowchart TD
     A[Input Video] --> B{Calculate Bitrate}
     B --> C[Pass 1: 1080p Encode]
     C --> D{Size <= Target?}
+
     D -- Yes --> E[Success]
     D -- No --> F{Bitrate < Floor?}
-    F -- No --> B[Reduce Bitrate & Retry]
+
+    F -- No --> R[Reduce Bitrate & Retry]
+    R --> B
+
     F -- Yes --> G[Rescue Mode: 720p]
     G --> H{Size <= Target?}
+
     H -- Yes --> E
     H -- No --> I[Last Resort: CRF 28]
     I --> J{Size <= Target?}
@@ -52,6 +57,33 @@ graph TD
     J -- No --> K[Split Video]
     K --> L[Optimize Part 1]
     K --> M[Optimize Part 2]
+```
+
+## Installation (Global)
+
+You can install this script as a system-wide command so you can run it from any folder without copying the file.
+
+**Linux / macOS / WSL:**
+
+1. Clone the repo
+```bash
+git clone https://github.com/nunogomes255/ffmpeg-shrinkwrap.git
+cd ffmpeg-shrinkwrap
+```
+2. Make it executable
+```bash
+chmod +x ffmpeg_shrinkwrap.sh
+```
+3. Link to your bin folder
+```bash
+sudo cp ffmpeg_shrinkwrap.sh /usr/local/bin/ffmpeg-shrinkwrap
+```
+
+**Now you can run it anywhere:**
+
+```bash
+cd /path/to/your/videos
+ffmpeg-shrinkwrap
 ```
 
 ## Usage
