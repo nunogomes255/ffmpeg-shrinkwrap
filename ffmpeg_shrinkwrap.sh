@@ -1,7 +1,7 @@
 #!/bin/bash
-# Constraint-Driven MP4 Optimizer for Discord
 
 set -e # Fail fast on error.
+set -o pipefail # Capture errors even inside pipes
 
 # --- CLI Interface & Argument Parsing ---
 usage() {
@@ -43,6 +43,7 @@ shift $((OPTIND - 1))
 MAX_SIZE_MB=10.0
 INITIAL_AUDIO_BITRATE_KBPS=192
 OVERHEAD_KB=200
+MAX_VIDEO_BITRATE_KBPS=10000
 OUTPUT_DIR="./optimized"
 SUMMARY_FILE="optimization_summary.txt"
 
@@ -60,10 +61,93 @@ bail_out() { # Fatal error handler.
     exit 1
 }
 
+# Crash Cleanup
+
+cleanup_artifacts() {
+    if [ "$cleanup" -eq 1 ] && [ -d "$OUTPUT_DIR" ]; then
+        # Changed pattern to "*pass*" to catch both ffmpeg2pass and rescue_pass logs
+        find "$OUTPUT_DIR/" -maxdepth 1 -type f -name "*pass*" -o -name "*_temp_*.mp4" -o -name "*_error_*.txt" -delete 2>/dev/null
+    fi
+}
+
+
+on_interrupt() {
+    echo -e "\n\n[!] Script interrupted by user. Cleaning up partial files..."
+    cleanup_artifacts
+    echo "Cleanup complete. Exiting."
+    exit 130
+}
+
+# Catch Ctrl+C (SIGINT) and Termination (SIGTERM)
+trap on_interrupt SIGINT SIGTERM
+
+# Parses -progress pipe:1 output to calculate percentage
+run_with_progress() {
+    local desc="$1"
+    local duration="$2"
+    shift 2
+    local cmd=("$@")
+
+    tput civis # Hide cursor
+
+    # Run command, pipe progress to loop, send errors to /dev/null (or log file in calls)
+    "${cmd[@]}" -progress pipe:1 | while IFS= read -r line; do
+        if [[ "$line" == "out_time_us="* ]]; then
+            local current_us=${line#out_time_us=}
+            
+            if [ "$duration" != "0" ] && [ "$current_us" != "N/A" ]; then
+                # Calculate Percentage
+                local pct=$(awk -v c="$current_us" -v d="$duration" 'BEGIN { printf "%.0f", (c / (d * 1000000)) * 100 }')
+                # Clamp to 100
+                if [ "$pct" -gt 100 ]; then pct=100; fi
+
+                # Draw Bar
+                local width=20
+                local filled=$(awk -v p="$pct" -v w="$width" 'BEGIN { printf "%.0f", (p / 100) * w }')
+                local empty=$((width - filled))
+                
+                local bar=""
+                # Append # for filled
+                for ((i=0; i<filled; i++)); do bar+="#"; done
+                # Append - for empty
+                for ((i=0; i<empty; i++)); do bar+="-"; done
+
+                printf "\r  %s [%s] %3d%% " "$desc" "$bar" "$pct"
+            fi
+        fi
+    done
+
+    # Capture exit code of the piped command
+    local exit_code=$?
+    
+    # Restore cursor and newline
+    tput cnorm
+    echo ""
+    
+    return $exit_code
+}
+
 check_dependencies() { # Verify runtime environment.
     for cmd in ffmpeg ffprobe bc awk; do
         command -v "$cmd" >/dev/null || bail_out "Dependency missing: $cmd. Install it."
     done
+}
+
+# Codec Fallback
+detect_codec() {
+    if ffmpeg -encoders 2>/dev/null | grep -q "libx265"; then
+        echo "libx265"
+    else
+        echo "libx264"
+    fi
+}
+
+detect_vsync_flag() { # Determines if we should use the modern -fps_mode or legacy -vsync
+    if ffmpeg -version 2>&1 | grep -qE "ffmpeg version [5-9]\.|ffmpeg version [1-9][0-9]\."; then
+        echo "-fps_mode cfr"
+    else
+        echo "-vsync 1"
+    fi
 }
 
 get_file_size_mb() { # Return file size in MB with decimal precision.
@@ -130,9 +214,9 @@ rescue_video() { # Fallback Strategy: Downscale to 720p to maintain bitrate dens
     while [ $retries -lt $max_retries ]; do
         echo "  [Rescue] Attempt $((retries + 1)) (1080p): Re-encoding @ ~${current_video_kbps}kbps..."
 
-        ffmpeg -y -i "$input_file" -pass 1 -passlogfile "$passlog" -c:v libx265 -b:v "${current_video_kbps}k" -preset "$preset" \
+        run_with_progress "Pass 1" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 1 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_kbps}k" -preset "$preset" \
             -vf "scale='min(1920,iw)':-2" -an -f null /dev/null 2>"${OUTPUT_DIR}/rescue_1080p_pass1_error_${filename}.txt" && \
-        ffmpeg -y -i "$input_file" -pass 2 -passlogfile "$passlog" -c:v libx265 -b:v "${current_video_kbps}k" -preset "$preset" \
+        run_with_progress "Pass 2" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 2 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_kbps}k" -preset "$preset" \
             -vf "scale='min(1920,iw)':-2" -c:a aac -b:a "${min_audio_bitrate_kbps}k" -ac 2 -map_metadata 0 -movflags +faststart "$output_file" 2>"${OUTPUT_DIR}/rescue_1080p_pass2_error_${filename}.txt"
 
         local final_size=$(get_file_size_mb "$output_file")
@@ -179,9 +263,9 @@ rescue_video() { # Fallback Strategy: Downscale to 720p to maintain bitrate dens
     while [ $retries -lt $max_retries ]; do
         echo "  [Rescue] 720p Attempt $((retries + 1)): Target ~${current_video_kbps}kbps..."
 
-        ffmpeg -y -i "$input_file" -pass 1 -passlogfile "$passlog" -c:v libx265 -b:v "${current_video_kbps}k" -preset "$preset" \
+        run_with_progress "Pass 1" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 1 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_kbps}k" -preset "$preset" \
             -vf "scale='min(1280,iw)':-2" -an -f null /dev/null 2>"${OUTPUT_DIR}/rescue_720p_pass1_error_${filename}.txt" && \
-        ffmpeg -y -i "$input_file" -pass 2 -passlogfile "$passlog" -c:v libx265 -b:v "${current_video_kbps}k" -preset "$preset" \
+        run_with_progress "Pass 2" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 2 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_kbps}k" -preset "$preset" \
             -vf "scale='min(1280,iw)':-2" -c:a aac -b:a "${min_audio_bitrate_kbps}k" -ac 2 -map_metadata 0 -movflags +faststart "$output_file" 2>"${OUTPUT_DIR}/rescue_720p_pass2_error_${filename}.txt"
 
         local final_size=$(get_file_size_mb "$output_file")
@@ -221,12 +305,17 @@ split_video() { # Temporal Segmentation: Split video at nearest keyframe.
     local duration=$(get_duration "$input_file") || { record_summary "$filename$part_suffix" "$(get_file_size_mb "$input_file")" "N/A" "Split Duration Fail"; return 1; }
 
     # --- Pre-flight check ---
-    if (( $(echo "$duration < 25.0" | bc -l) )); then
-        # If duration is trivial, splitting is non-viable. Route to Rescue.
+    # Calculate if even at minimum bitrates we can't fit
+    local absolute_min_video_bytes=$(echo "$min_video_bitrate_kbps * 1000 * $duration / 8" | bc -l)
+    local absolute_min_audio_bytes=$(echo "$min_audio_bitrate_kbps * 1000 * $duration / 8" | bc -l)
+    local absolute_min_total=$(echo "($absolute_min_video_bytes + $absolute_min_audio_bytes) / 1048576" | bc -l)
+
+    if (( $(echo "$absolute_min_total > $target_size_mb" | bc -l) )); then
+        # Mathematically impossible without splitting
+        split_video "$input_file" "$part_suffix"
+    else
         rescue_video "$input_file" "$part_suffix"
-        return $?
     fi
-    # ------------------------
 
     duration=$(printf "%.3f" "$duration")
     local half_duration=$(echo "$duration / 2" | bc -l)
@@ -319,6 +408,11 @@ optimize_video() { # Primary Optimization Pipeline: 2-Pass HEVC Encoding.
     local video_bitrate_bps=$(echo "$target_video_bytes * 8 / $duration" | bc -l)
     video_bitrate_bps=$(printf "%.0f" "$video_bitrate_bps") 
 
+    if [ "$video_bitrate_bps" -gt $((MAX_VIDEO_BITRATE_KBPS * 1000)) ]; then
+        echo "  [Info] Calculated bitrate ($((video_bitrate_bps/1000))k) is overkill. Capping at ${MAX_VIDEO_BITRATE_KBPS}k."
+        video_bitrate_bps=$((MAX_VIDEO_BITRATE_KBPS * 1000))
+    fi
+
     if [ "$video_bitrate_bps" -lt $((min_video_bitrate_kbps * 1000)) ]; then
         video_bitrate_bps=$((min_video_bitrate_kbps * 1000))
     fi
@@ -334,8 +428,9 @@ optimize_video() { # Primary Optimization Pipeline: 2-Pass HEVC Encoding.
             video_bitrate_bps=$((min_video_bitrate_kbps * 1000))
         fi
 
-        ffmpeg -y -i "$input_file" -pass 1 -passlogfile "$passlog" -c:v libx265 -b:v "${current_video_bitrate_kbps}k" -preset "$preset" -vf "scale='min(1920,iw)':-2" -an -f null /dev/null 2>"${OUTPUT_DIR}/ffmpeg_pass1_error_${filename}${part_suffix}.txt" && \
-        ffmpeg -y -i "$input_file" -pass 2 -passlogfile "$passlog" -c:v libx265 -b:v "${current_video_bitrate_kbps}k" -preset "$preset" \
+        run_with_progress "Pass 1" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 1 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_bitrate_kbps}k" -preset "$preset" \
+            -vf "scale='min(1920,iw)':-2" -an -f null /dev/null 2>"${OUTPUT_DIR}/ffmpeg_pass1_error_${filename}${part_suffix}.txt" && \
+        run_with_progress "Pass 2" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 2 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_bitrate_kbps}k" -preset "$preset" \
             -vf "scale='min(1920,iw)':-2" -c:a aac -b:a "${audio_bitrate_kbps}k" -ac 2 -map_metadata 0 -movflags +faststart "$temp_file" 2>"${OUTPUT_DIR}/ffmpeg_pass2_error_${filename}${part_suffix}.txt"
 
         if [ $? -ne 0 ]; then
@@ -374,21 +469,39 @@ optimize_video() { # Primary Optimization Pipeline: 2-Pass HEVC Encoding.
                     fi
                     echo "  Video bitrate at floor, reducing audio to ${audio_bitrate_kbps}kbps..."
                 else
-                    echo "  All bitrates at floor. Initiating Split Protocol..."
-                    rm -f "$temp_file" "${passlog}"-* 2>/dev/null
-                    split_video "$input_file" "$part_suffix"
-                    return $?
+                    echo "  All bitrates at floor. Initiating Fallback Protocol..."
+                    break
                 fi
             fi
         else
-            echo "Max retries exhausted. Initiating Split Protocol..."
-            rm -f "$temp_file" "${passlog}"-* 2>/dev/null
-            split_video "$input_file" "$part_suffix"
-            return $?
+            echo "Max retries exhausted. Initiating Fallback Protocol..."
+            break
         fi
         rm -f "$temp_file" 2>/dev/null # Cleanup for retry
     done
-    return 1 # Fallback catch-all
+
+    echo "  [Info] 2-Pass failed. Attempting last resort CRF 28 pass before splitting..."
+    run_with_progress "CRF Pass" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -crf 28 -preset "$preset" \
+        -vf "scale='min(1920,iw)':-2" -c:a aac -b:a "64k" -ac 2 -map_metadata 0 -movflags +faststart "$temp_file" 2>/dev/null
+
+    local crf_size_mb=$(get_file_size_mb "$temp_file")
+
+    if (( $(echo "$crf_size_mb <= $MAX_SIZE_MB" | bc -l) )) && (( $(echo "$crf_size_mb > 0" | bc -l) )); then
+        mv "$temp_file" "$output_file"
+    
+        record_summary "$filename$part_suffix" "$orig_size_mb" "$crf_size_mb" "Rescued (CRF)"
+    
+        echo "Success (CRF Rescue): $output_file (${crf_size_mb}MB)"
+    
+        return 0
+    fi
+    
+    echo "  [Info] CRF pass failed (${crf_size_mb}MB). Proceeding to split..."
+    rm -f "$temp_file" "${passlog}"-* 2>/dev/null
+    
+    split_video "$input_file" "$part_suffix"
+    
+    return $?
 }
 
 
@@ -396,11 +509,19 @@ optimize_video() { # Primary Optimization Pipeline: 2-Pass HEVC Encoding.
 echo "Initializing optimization pipeline..."
 
 check_dependencies
+VSYNC_FLAG=$(detect_vsync_flag)
+VIDEO_CODEC=$(detect_codec)
+
+echo "Configuration: Codec=$VIDEO_CODEC | Vsync=$VSYNC_FLAG"
 
 shopt -s nullglob
 files=("$@")
 if [ ${#files[@]} -eq 0 ]; then
     files=(*.mp4)
+fi
+
+if [ ${#files[@]} -eq 0 ] || [ ! -f "${files[0]}" ]; then
+    bail_out "No .mp4 files found in current directory."
 fi
 
 for file in "${files[@]}"; do
@@ -425,10 +546,7 @@ echo "Writing summary to $SUMMARY_FILE..."
     done
 } > "$SUMMARY_FILE"
 
-if [ "$cleanup" -eq 1 ]; then
-    echo "Cleaning up temporary artifacts..."
-    find "$OUTPUT_DIR/" -maxdepth 1 -type f -name "ffmpeg_pass*" -o -name "*_temp_*.mp4" -o -name "ffmpeg_pass*_error_*.txt" -o -name "split_part*_error_*.txt" -delete
-fi
+cleanup_artifacts
 
 echo "Optimization complete. Summary in $SUMMARY_FILE."
 

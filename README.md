@@ -12,15 +12,18 @@ Unlike static presets, it uses **dynamic bitrate calculation** and a **heuristic
 
 ## Key Features
 
-*   **Target-Based Encoding:** Calculates exact bitrates to fill the target size without wasting space.
-*   **Heuristic "Rescue" Logic:**
-    *   Tries to keep native resolution (1080p).
-    *   If the file is too big, it recalculates and retries.
-    *   If the bitrate drops below a quality floor, it automatically **downscales to 720p**.
-    *   **Smart Splitting:** Scans the stream for the nearest keyframe to the midpoint to ensure a clean cut.
+* **Smart UX:** Now features **visual progress bars** for encoding passes and handles `Ctrl+C` gracefully (automatically cleaning up temporary files).
+* **Target-Based Encoding:** Calculates exact bitrates to fill the target size without wasting space.
+* **Heuristic "Rescue" Logic:**
+    * **Phase 1:** Retries 1080p with reduced bitrate.
+    * **Phase 2:** Downscales to 720p if bitrate floor is hit.
+    * **Phase 3 (New):** If 2-pass encoding fails, attempts a "Last Resort" generic CRF 28 pass.
+    * **Phase 4:** Splits the video at the nearest keyframe to the midpoint.
     *   *Fallback:* If keyframe data is malformed or missing, it forces a hard geometric split and **repairs the stream structure** during the subsequent re-encoding pass.
-*   **High Efficiency:** Uses `libx265` (HEVC) 2-pass encoding.
-*   **Post-Mortem Reports:** Generates a summary of compression ratios and actions taken.
+* **Broad Compatibility:** Automatically detects your FFmpeg version to use the correct flags (`-vsync` vs `-fps_mode`) and ensures `yuv420p` pixel format for playback on all devices.
+* **Post-Mortem Reports:** Generates a summary of compression ratios and actions taken.
+* **High Efficiency:** Uses `libx265` (HEVC) 2-pass encoding.
+
 
 ## How It Works
 
@@ -43,9 +46,12 @@ graph TD
     F -- Yes --> G[Rescue Mode: 720p]
     G --> H{Size <= Target?}
     H -- Yes --> E
-    H -- No --> I[Split Video]
-    I --> J[Optimize Part 1]
-    I --> K[Optimize Part 2]
+    H -- No --> I[Last Resort: CRF 28]
+    I --> J{Size <= Target?}
+    J -- Yes --> E
+    J -- No --> K[Split Video]
+    K --> L[Optimize Part 1]
+    K --> M[Optimize Part 2]
 ```
 
 ## Usage
@@ -118,7 +124,7 @@ Grand Theft Auto V Enhanced 2025.12.10 - 49.504       9.461        80.00        
 
 Required tools (must be in your `$PATH`):
 
-*   `ffmpeg` (with `libx265` support)
+*   `ffmpeg` (Recommend version 5.0+, but script auto-adapts to older versions)
 *   `ffprobe`
 *   `bc` (for floating-point math)
 *   `awk`
