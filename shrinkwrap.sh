@@ -43,7 +43,7 @@ shift $((OPTIND - 1))
 MAX_SIZE_MB=10.0
 INITIAL_AUDIO_BITRATE_KBPS=192
 OVERHEAD_KB=200
-MAX_VIDEO_BITRATE_KBPS=10000
+MAX_VIDEO_BITRATE_KBPS=50000
 OUTPUT_DIR="./optimized"
 SUMMARY_FILE="optimization_summary.txt"
 
@@ -184,8 +184,10 @@ record_summary() { # Append entry to session report.
 rescue_video() { # Fallback Strategy: Downscale to 720p to maintain bitrate density.
     local input_file="$1"
     local part_suffix="${2:-}"
+    local orig_size_mb="$3"
     local filename=$(basename "$input_file" .mp4)
     local output_file="${OUTPUT_DIR}/${filename}${part_suffix}_optimized.mp4"
+    local temp_file="${OUTPUT_DIR}/${filename}${part_suffix}_temp_$$_${RANDOM}.mp4"
     local passlog="${OUTPUT_DIR}/rescue_pass_$$_${RANDOM}"
     
     echo "  [Rescue] Bitrate constraints unsatisfiable at 1080p. Engaging fallback..."
@@ -254,7 +256,6 @@ rescue_video() { # Fallback Strategy: Downscale to 720p to maintain bitrate dens
     echo "  [Rescue] 1080p failed. Phase 2: Downscaling to 720p..."
 
     # Reset bitrate calculation for 720p
-    # Using the last calculated safe bitrate, ensuring it respects the floor
     if (( $(echo "$current_video_kbps < $min_video_bitrate_kbps" | bc -l) )); then
         current_video_kbps=$min_video_bitrate_kbps
     fi
@@ -288,19 +289,36 @@ rescue_video() { # Fallback Strategy: Downscale to 720p to maintain bitrate dens
         current_video_kbps=${new_kbps%.*}
 
         if (( $(echo "$current_video_kbps < $min_video_bitrate_kbps" | bc -l) )); then
-            echo "  [Rescue] 720p bitrate floor reached. Aborting."
+            echo "  [Rescue] 720p bitrate floor reached."
             break
         fi
         retries=$((retries + 1))
     done
 
-    echo "  [Rescue] Failed all attempts. Logs preserved in $OUTPUT_DIR."
-    rm -f "${passlog}"-* 2>/dev/null
+    # --- 4. Phase 3: Last Resort CRF 28 @ 720p ---
+    echo "  [Rescue] Phase 3: Last resort CRF 28 @ 720p..."
+    run_with_progress "CRF Pass" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -crf 28 -preset "$preset" \
+        -vf "scale='min(1280,iw)':-2" -c:a aac -b:a "64k" -ac 2 -map_metadata 0 -movflags +faststart "$temp_file" 2>/dev/null
+
+    local crf_size=$(get_file_size_mb "$temp_file")
+
+    if (( $(echo "$crf_size <= $target_size_mb" | bc -l) )) && (( $(echo "$crf_size > 0" | bc -l) )); then
+        mv "$temp_file" "$output_file"
+        record_summary "$filename" "$(get_file_size_mb "$input_file")" "$crf_size" "Rescued (CRF)"
+        echo "  [Rescue] Success (CRF): $output_file ($crf_size MB)"
+        rm -f "${passlog}"-* 2>/dev/null
+        return 0
+    fi
+    
+    echo "  [Rescue] All rescue attempts failed. Logs preserved in $OUTPUT_DIR."
+    rm -f "$temp_file" "${passlog}"-* 2>/dev/null
     return 1
 }
 
+
+
 split_video() { # Temporal Segmentation: Split video at nearest keyframe.
-    local input_file="$1" part_suffix="$2"
+    local input_file="$1" part_suffix="$2" 
     local filename=$(basename "$input_file" .mp4)
     local duration=$(get_duration "$input_file") || { record_summary "$filename$part_suffix" "$(get_file_size_mb "$input_file")" "N/A" "Split Duration Fail"; return 1; }
 
@@ -310,13 +328,15 @@ split_video() { # Temporal Segmentation: Split video at nearest keyframe.
     local absolute_min_audio_bytes=$(echo "$min_audio_bitrate_kbps * 1000 * $duration / 8" | bc -l)
     local absolute_min_total=$(echo "($absolute_min_video_bytes + $absolute_min_audio_bytes) / 1048576" | bc -l)
 
-    if (( $(echo "$absolute_min_total > $target_size_mb" | bc -l) )); then
-        # Mathematically impossible without splitting
-        split_video "$input_file" "$part_suffix"
-    else
-        rescue_video "$input_file" "$part_suffix"
+    # If mathematically impossible, proceed with split (below)
+    # If rescue might work, try that instead
+    if (( $(echo "$absolute_min_total <= $target_size_mb" | bc -l) )); then
+        echo "  Video might fit with rescue mode. Attempting rescue before split..."
+        rescue_video "$input_file" "$part_suffix" "$orig_size_mb"
+        return $?
     fi
-
+    # Continue with actual split logic...
+    echo "  Video too long for target size even at minimum bitrates. Must split."
     duration=$(printf "%.3f" "$duration")
     local half_duration=$(echo "$duration / 2" | bc -l)
 
@@ -479,25 +499,6 @@ optimize_video() { # Primary Optimization Pipeline: 2-Pass HEVC Encoding.
         fi
         rm -f "$temp_file" 2>/dev/null # Cleanup for retry
     done
-
-    echo "  [Info] 2-Pass failed. Attempting last resort CRF 28 pass before splitting..."
-    run_with_progress "CRF Pass" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -crf 28 -preset "$preset" \
-        -vf "scale='min(1920,iw)':-2" -c:a aac -b:a "64k" -ac 2 -map_metadata 0 -movflags +faststart "$temp_file" 2>/dev/null
-
-    local crf_size_mb=$(get_file_size_mb "$temp_file")
-
-    if (( $(echo "$crf_size_mb <= $MAX_SIZE_MB" | bc -l) )) && (( $(echo "$crf_size_mb > 0" | bc -l) )); then
-        mv "$temp_file" "$output_file"
-    
-        record_summary "$filename$part_suffix" "$orig_size_mb" "$crf_size_mb" "Rescued (CRF)"
-    
-        echo "Success (CRF Rescue): $output_file (${crf_size_mb}MB)"
-    
-        return 0
-    fi
-    
-    echo "  [Info] CRF pass failed (${crf_size_mb}MB). Proceeding to split..."
-    rm -f "$temp_file" "${passlog}"-* 2>/dev/null
     
     split_video "$input_file" "$part_suffix"
     
