@@ -1,0 +1,11 @@
+# force .sh scripts to use Linux line endings (LF)
+# fixes the "command not found" errors
+*.sh text eol=lf
+
+# force Windows scripts to use Windows line endings (CRLF)
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Default behavior for other files (Git decides based on OS)
+* text=auto
