@@ -29,24 +29,22 @@ Unlike static presets, it calculates exact bitrates and uses a **heuristic** to 
 ---
 
 ## Installation
+### ⊞ Windows Installation & Usage
 
-<details>
-<summary><b>⊞ Windows Installation (Zero Config)</b></summary>
-
-### Quick Start
+#### Quick Start
 1. **Download** - Click `Code → Download ZIP` and extract
 2. **Run** - Double-click `drag_video_here.bat`
    - First time: Press `Y` to auto-download FFmpeg (~100MB, one-time)
    - After setup: Drag videos onto the .bat file to compress or double-click to compress all videos in current directory 
 
-**That's it!** Compressed videos appear in the `optimized` folder.
+**That's all Folks!** Compressed videos appear in the `optimized` folder.
 
-### Usage Options
+#### Usage Options
 - **Option A:** Drag video file(s) onto `drag_video_here.bat`
 - **Option B:** Drag an entire folder onto `drag_video_here.bat`
 - **Option C:** Double-click `drag_video_here.bat` to process all .mp4s in current folder
 
-### Arguments (PowerShell)
+#### Arguments (PowerShell)
 ```powershell
 .\shrinkwrap.ps1 -TargetSizeMB 8 -Preset faster -Files "video1.mp4","video2.mp4"
 ```
@@ -61,21 +59,20 @@ Unlike static presets, it calculates exact bitrates and uses a **heuristic** to 
 -NoCleanup               Keep logs and temp files for debugging
 ```
 
-### Troubleshooting
+#### Troubleshooting
 **"FFmpeg download failed"**  
 Download manually from [gyan.dev/ffmpeg/builds](https://www.gyan.dev/ffmpeg/builds/) (officially listed at [ffmpeg.org](https://ffmpeg.org/download.html#build-windows)), extract `ffmpeg.exe` and `ffprobe.exe`, place in shrinkwrap folder.
 
 **"Script won't run / security warning"**  
 Windows may block scripts downloaded from the internet.
 Right-click `drag_video_here.bat` → Properties → Unblock → OK
-</details>
+
 
 ---
 
-<details>
-<summary><b>🐧 Linux / macOS Installation</b></summary>
+### 🐧 Linux / macOS Installation
 
-### Quick Install (System-Wide)
+#### Quick Install (System-Wide)
 ```bash
 # Clone repo
 git clone https://github.com/nunogomes255/ffmpeg-shrinkwrap.git
@@ -94,7 +91,7 @@ cd /path/to/your/videos
 ffmpeg-shrinkwrap
 ```
 
-### Usage
+#### Usage
 Process all .mp4 files in current directory:
 ```bash
 ./shrinkwrap
@@ -105,7 +102,7 @@ Process specific files:
 ./shrinkwrap video1.mp4 video2.mp4
 ```
 
-### Options
+#### Options
 ```
 -t <float>    Target file size in MB (default: 9.8)
 -p <string>   FFmpeg x265 preset (slow/medium/fast, default: slow)
@@ -116,7 +113,7 @@ Process specific files:
 -h            Display help
 ```
 
-### Examples
+#### Examples
 **Target 25MB (Discord Nitro Basic):**
 ```bash
 ./shrinkwrap -t 24.5 -p medium video.mp4
@@ -126,19 +123,17 @@ Process specific files:
 ```bash
 ./shrinkwrap -t 5.0 -v 300 -a 48 video.mp4
 ```
-</details>
 
 ---
 
-<details>
-<summary><b>How It Works</b></summary>
+### How It Works
 
-### The Math
+#### The Math
 Instead of guessing a CRF value, the script calculates target video bitrate ($b_v$) based on target size ($S$), duration ($t$), audio bitrate ($b_a$), and overhead ($O$):
 
 $$b_v = \frac{(S - O) \times 8}{t} - b_a$$
 
-### The Logic Flow
+#### The Logic Flow
 ```mermaid
 flowchart TD
     A[Input Video] --> B{Calculate Bitrate}
@@ -165,7 +160,6 @@ flowchart TD
     M --> E
     N --> E
 ```
-</details>
 
 ---
 
@@ -198,8 +192,7 @@ Grand Theft Auto V 2025.03.10 - Clip 5   68.718      9.499        86.18        O
 
 ---
 
-<details>
-<summary><b>Dependencies</b></summary>
+## Dependencies
 
 ### Windows
 - FFmpeg (auto-installed on first run)
@@ -221,12 +214,10 @@ sudo apt update && sudo apt install ffmpeg bc gawk
 ```bash
 brew install ffmpeg
 ```
-</details>
 
 ---
 
-<details>
-<summary><b>Security & Transparency</b></summary>
+## Security & Transparency
 
 ### FFmpeg Source
 Windows version downloads FFmpeg from:
@@ -243,12 +234,11 @@ git clone https://github.com/FFmpeg/FFmpeg
 # Follow: https://trac.ffmpeg.org/wiki/CompilationGuide
 ```
 
-</details>
+
 
 ---
 
-<details>
-<summary><b>FAQ</b></summary>
+## FAQ
 
 **Q: Why x265 instead of x264?**  
 A: Despite worse compatibility (doesn't run natively on windows 10 for free), HEVC (x265) is incredibly more optimized, produces 30-50% smaller files at the same quality, and it plays on Discord. This allows to achieve higher qualities with less file size. ([HEVC-x265 vs AVC-x264](https://www.boxcast.com/blog/hevc-h.265-vs.-h.264-avc-whats-the-difference))
@@ -264,7 +254,6 @@ A: Currently done and solely focused for MP4 files.
 
 **Q: Can I change the target to 8MB for Telegram?**  
 A: Yes! Use `-t 7.8` (Bash) or `-TargetSizeMB 7.8` (PowerShell).
-</details>
 
 ---
 
@@ -285,5 +274,6 @@ MIT License. Free to use, modify, and distribute.
 ---
 
 ## Acknowledgments
+
 
 Built for whoever is tired of manually tweaking replay settings, messing with Medal or using sketchy online converters/compressors. If this saved you time, give it a ⭐!
