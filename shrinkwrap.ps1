@@ -185,8 +185,9 @@ function Get-AudioLoudnessFilter {
     
     # Run analysis pass
     try {
+        # Add explicit quotes around InputFile to handle spaces correctly
         $AnalysisArgs = @(
-            "-i", $InputFile,
+            "-i", "`"$InputFile`"",
             "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
             "-f", "null",
             "-"
@@ -196,7 +197,7 @@ function Get-AudioLoudnessFilter {
             -NoNewWindow -Wait -PassThru -RedirectStandardError $JsonFile
         
         if (-not (Test-Path $JsonFile) -or (Get-Item $JsonFile).Length -eq 0) {
-            Write-ColorOutput "  [Warning] Audio analysis failed, falling back to single-pass" "Yellow"
+            Write-ColorOutput "  [Warning] Audio analysis failed (empty log), falling back to single-pass" "Yellow"
             Remove-Item $JsonFile -ErrorAction SilentlyContinue
             $FallbackFilter = "loudnorm=I=-16:TP=-1.5:LRA=11"
             $Script:AudioNormCache[$CacheKey] = $FallbackFilter
