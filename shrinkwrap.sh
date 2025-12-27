@@ -1,5 +1,7 @@
 #!/bin/bash
 
+export LC_ALL=C
+
 set -e # Fail fast on error.
 set -o pipefail # Capture errors even inside pipes
 
@@ -13,6 +15,7 @@ usage() {
     echo "  -a <kbps>       Minimum audio bitrate floor (default: 64)"
     echo "  -r <retries>    Max encoding retries per pass (default: 3)"
     echo "  -n              No cleanup - preserve logs/artifacts for debugging"
+    echo "  -l              Normalize audio loudness (EBU R128 / -16 LUFS, two-pass)"
     echo "  -h              Display help"
     echo ""
     echo "Processes *.mp4 files if none specified."
@@ -24,8 +27,9 @@ min_video_bitrate_kbps=500
 min_audio_bitrate_kbps=64
 max_retries=3
 cleanup=1 # Default: Clean artifacts on exit.
+normalize_audio=0 # Default: No audio normalization
 
-while getopts "p:t:v:a:r:nh" opt; do
+while getopts "p:t:v:a:r:nhl" opt; do
     case $opt in
         p) preset="$OPTARG" ;;
         t) target_size_mb="$OPTARG" ;;
@@ -33,6 +37,7 @@ while getopts "p:t:v:a:r:nh" opt; do
         a) min_audio_bitrate_kbps="$OPTARG" ;;
         r) max_retries="$OPTARG" ;;
         n) cleanup=0 ;; # Debug mode enabled
+        l) normalize_audio=1 ;; # Enable audio normalization
         h) usage; exit 0 ;;
         \?) echo "Invalid option: -$OPTARG" >&2; usage; exit 1 ;;
     esac
@@ -46,6 +51,9 @@ OVERHEAD_KB=200
 MAX_VIDEO_BITRATE_KBPS=50000
 OUTPUT_DIR="./optimized"
 SUMMARY_FILE="optimization_summary.txt"
+
+# --- Audio Normalization Cache ---
+declare -A AUDIO_NORM_CACHE
 
 # --- Reporting Structures ---
 declare -a PROCESSED_FILES=()
@@ -66,7 +74,7 @@ bail_out() { # Fatal error handler.
 cleanup_artifacts() {
     if [ "$cleanup" -eq 1 ] && [ -d "$OUTPUT_DIR" ]; then
         # Changed pattern to "*pass*" to catch both ffmpeg2pass and rescue_pass logs
-        find "$OUTPUT_DIR/" -maxdepth 1 -type f -name "*pass*" -o -name "*_temp_*.mp4" -o -name "*_error_*.txt" -delete 2>/dev/null
+        find "$OUTPUT_DIR/" -maxdepth 1 -type f -name "*pass*" -o -name "*_temp_*.mp4" -o -name "*_error_*.txt" -o -name "*_loudnorm_*.json" -delete 2>/dev/null
     fi
 }
 
@@ -166,6 +174,79 @@ get_duration() { # Extract stream duration via ffprobe.
     ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null
 }
 
+# Two-pass audio normalization analysis
+analyze_audio_loudness() {
+    local input_file="$1"
+    local cache_key=$(basename "$input_file")
+    
+    # Check if already analyzed
+    if [ -n "${AUDIO_NORM_CACHE[$cache_key]}" ]; then
+        echo "${AUDIO_NORM_CACHE[$cache_key]}"
+        return 0
+    fi
+    
+    local json_file="${OUTPUT_DIR}/$(basename "$input_file" .mp4)_loudnorm_$$_${RANDOM}.json"
+    
+    echo "  [Audio Analysis] Measuring loudness (two-pass mode)..." >&2
+    
+    # Run loudnorm analysis pass
+    ffmpeg -i "$input_file" -af loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json -f null - 2>&1 | \
+        grep -A 12 "Parsed_loudnorm" | grep -A 12 "{" > "$json_file"
+    
+    if [ ! -s "$json_file" ]; then
+        echo "  [Warning] Audio analysis failed, falling back to single-pass" >&2
+        rm -f "$json_file"
+        echo ""
+        return 1
+    fi
+    
+    # Parse JSON using grep and sed (no jq dependency needed)
+    local input_i=$(grep '"input_i"' "$json_file" | sed 's/.*: "\(.*\)".*/\1/' | tr -d ' ')
+    local input_tp=$(grep '"input_tp"' "$json_file" | sed 's/.*: "\(.*\)".*/\1/' | tr -d ' ')
+    local input_lra=$(grep '"input_lra"' "$json_file" | sed 's/.*: "\(.*\)".*/\1/' | tr -d ' ')
+    local input_thresh=$(grep '"input_thresh"' "$json_file" | sed 's/.*: "\(.*\)".*/\1/' | tr -d ' ')
+    local target_offset=$(grep '"target_offset"' "$json_file" | sed 's/.*: "\(.*\)".*/\1/' | tr -d ' ')
+    
+    rm -f "$json_file"
+    
+    # Validate we got all values
+    if [ -z "$input_i" ] || [ -z "$input_tp" ] || [ -z "$input_lra" ] || [ -z "$input_thresh" ] || [ -z "$target_offset" ]; then
+        echo "  [Warning] Failed to parse loudness data, falling back to single-pass" >&2
+        echo ""
+        return 1
+    fi
+    
+    echo "  [Audio Analysis] Measured: ${input_i} LUFS (target: -16 LUFS)" >&2
+    
+    # Build the two-pass filter string
+    local filter="loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=${input_i}:measured_TP=${input_tp}:measured_LRA=${input_lra}:measured_thresh=${input_thresh}:offset=${target_offset}:linear=true"
+    
+    # Cache the result
+    AUDIO_NORM_CACHE[$cache_key]="$filter"
+    
+    echo "$filter"
+    return 0
+}
+
+get_audio_filter() {
+    local input_file="$1"
+    
+    if [ "$normalize_audio" -eq 0 ]; then
+        echo ""
+        return 0
+    fi
+    
+    # Try two-pass analysis
+    local filter=$(analyze_audio_loudness "$input_file")
+    
+    if [ -z "$filter" ]; then
+        # Fallback to single-pass if analysis fails
+        echo "loudnorm=I=-16:TP=-1.5:LRA=11"
+    else
+        echo "$filter"
+    fi
+}
+
 record_summary() { # Append entry to session report.
     local file="$1" orig_size="$2" final_size="$3" status="$4"
     PROCESSED_FILES+=("$file")
@@ -189,6 +270,15 @@ rescue_video() { # Fallback Strategy: Downscale to 720p to maintain bitrate dens
     local output_file="${OUTPUT_DIR}/${filename}${part_suffix}_optimized.mp4"
     local temp_file="${OUTPUT_DIR}/${filename}${part_suffix}_temp_$$_${RANDOM}.mp4"
     local passlog="${OUTPUT_DIR}/rescue_pass_$$_${RANDOM}"
+    
+    # Get audio filter (two-pass if enabled)
+    local audio_filter_args=""
+    if [ "$normalize_audio" -eq 1 ]; then
+        local filter=$(get_audio_filter "$input_file")
+        if [ -n "$filter" ]; then
+            audio_filter_args="-af $filter"
+        fi
+    fi
     
     echo "  [Rescue] Bitrate constraints unsatisfiable at 1080p. Engaging fallback..."
 
@@ -219,7 +309,7 @@ rescue_video() { # Fallback Strategy: Downscale to 720p to maintain bitrate dens
         run_with_progress "Pass 1" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 1 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_kbps}k" -preset "$preset" \
             -vf "scale='min(1920,iw)':-2" -an -f null /dev/null 2>"${OUTPUT_DIR}/rescue_1080p_pass1_error_${filename}.txt" && \
         run_with_progress "Pass 2" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 2 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_kbps}k" -preset "$preset" \
-            -vf "scale='min(1920,iw)':-2" -c:a aac -b:a "${min_audio_bitrate_kbps}k" -ac 2 -map_metadata 0 -movflags +faststart "$output_file" 2>"${OUTPUT_DIR}/rescue_1080p_pass2_error_${filename}.txt"
+            -vf "scale='min(1920,iw)':-2" -c:a aac -b:a "${min_audio_bitrate_kbps}k" $audio_filter_args -ac 2 -map_metadata 0 -movflags +faststart "$output_file" 2>"${OUTPUT_DIR}/rescue_1080p_pass2_error_${filename}.txt"
 
         local final_size=$(get_file_size_mb "$output_file")
 
@@ -267,7 +357,7 @@ rescue_video() { # Fallback Strategy: Downscale to 720p to maintain bitrate dens
         run_with_progress "Pass 1" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 1 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_kbps}k" -preset "$preset" \
             -vf "scale='min(1280,iw)':-2" -an -f null /dev/null 2>"${OUTPUT_DIR}/rescue_720p_pass1_error_${filename}.txt" && \
         run_with_progress "Pass 2" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 2 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_kbps}k" -preset "$preset" \
-            -vf "scale='min(1280,iw)':-2" -c:a aac -b:a "${min_audio_bitrate_kbps}k" -ac 2 -map_metadata 0 -movflags +faststart "$output_file" 2>"${OUTPUT_DIR}/rescue_720p_pass2_error_${filename}.txt"
+            -vf "scale='min(1280,iw)':-2" -c:a aac -b:a "${min_audio_bitrate_kbps}k" $audio_filter_args -ac 2 -map_metadata 0 -movflags +faststart "$output_file" 2>"${OUTPUT_DIR}/rescue_720p_pass2_error_${filename}.txt"
 
         local final_size=$(get_file_size_mb "$output_file")
 
@@ -298,7 +388,7 @@ rescue_video() { # Fallback Strategy: Downscale to 720p to maintain bitrate dens
     # --- 4. Phase 3: Last Resort CRF 28 @ 720p ---
     echo "  [Rescue] Phase 3: Last resort CRF 28 @ 720p..."
     run_with_progress "CRF Pass" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -crf 28 -preset "$preset" \
-        -vf "scale='min(1280,iw)':-2" -c:a aac -b:a "64k" -ac 2 -map_metadata 0 -movflags +faststart "$temp_file" 2>/dev/null
+        -vf "scale='min(1280,iw)':-2" -c:a aac -b:a "64k" $audio_filter_args -ac 2 -map_metadata 0 -movflags +faststart "$temp_file" 2>/dev/null
 
     local crf_size=$(get_file_size_mb "$temp_file")
 
@@ -397,6 +487,15 @@ optimize_video() { # Primary Optimization Pipeline: 2-Pass HEVC Encoding.
     local temp_file="${OUTPUT_DIR}/${filename}${part_suffix}_temp_$$_${RANDOM}.mp4"
     local passlog="${OUTPUT_DIR}/ffmpeg2pass_$$_${RANDOM}"
     mkdir -p "$OUTPUT_DIR"
+    
+    # Get audio filter (two-pass if enabled)
+    local audio_filter_args=""
+    if [ "$normalize_audio" -eq 1 ]; then
+        local filter=$(get_audio_filter "$input_file")
+        if [ -n "$filter" ]; then
+            audio_filter_args="-af $filter"
+        fi
+    fi
 
     local orig_size_mb=$(get_file_size_mb "$input_file") || { record_summary "$filename$part_suffix" "N/A" "N/A" "Size Check Fail"; return 1; }
 
@@ -451,7 +550,7 @@ optimize_video() { # Primary Optimization Pipeline: 2-Pass HEVC Encoding.
         run_with_progress "Pass 1" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 1 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_bitrate_kbps}k" -preset "$preset" \
             -vf "scale='min(1920,iw)':-2" -an -f null /dev/null 2>"${OUTPUT_DIR}/ffmpeg_pass1_error_${filename}${part_suffix}.txt" && \
         run_with_progress "Pass 2" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -pass 2 -passlogfile "$passlog" -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -b:v "${current_video_bitrate_kbps}k" -preset "$preset" \
-            -vf "scale='min(1920,iw)':-2" -c:a aac -b:a "${audio_bitrate_kbps}k" -ac 2 -map_metadata 0 -movflags +faststart "$temp_file" 2>"${OUTPUT_DIR}/ffmpeg_pass2_error_${filename}${part_suffix}.txt"
+            -vf "scale='min(1920,iw)':-2" -c:a aac -b:a "${audio_bitrate_kbps}k" $audio_filter_args -ac 2 -map_metadata 0 -movflags +faststart "$temp_file" 2>"${OUTPUT_DIR}/ffmpeg_pass2_error_${filename}${part_suffix}.txt"
 
         if [ $? -ne 0 ]; then
             echo "Encoding failed (Attempt $((retries + 1))). Logs in $OUTPUT_DIR." >&2
@@ -500,6 +599,25 @@ optimize_video() { # Primary Optimization Pipeline: 2-Pass HEVC Encoding.
         rm -f "$temp_file" 2>/dev/null # Cleanup for retry
     done
     
+    # CRF Rescue
+    echo "  [Info] Attempting CRF 28 rescue before splitting..."
+    
+    run_with_progress "CRF Pass" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -crf 28 -preset "$preset" \
+        -vf "scale='min(1920,iw)':-2" -c:a aac -b:a "64k" $audio_filter_args -ac 2 -map_metadata 0 -movflags +faststart "$temp_file" 2>/dev/null
+
+    local crf_size_mb=$(get_file_size_mb "$temp_file")
+    
+    if (( $(echo "$crf_size_mb <= $MAX_SIZE_MB" | bc -l) )) && (( $(echo "$crf_size_mb > 0" | bc -l) )); then
+        mv "$temp_file" "$output_file"
+        record_summary "$filename$part_suffix" "$orig_size_mb" "$crf_size_mb" "Rescued (CRF)"
+        echo "Success (CRF Rescue): $output_file (${crf_size_mb}MB)"
+        rm -f "${passlog}"-* 2>/dev/null
+        return 0
+    fi
+    
+    echo "  [Info] CRF pass failed (${crf_size_mb}MB). Proceeding to split..."
+    rm -f "$temp_file" "${passlog}"-* 2>/dev/null
+    
     split_video "$input_file" "$part_suffix"
     
     return $?
@@ -513,7 +631,7 @@ check_dependencies
 VSYNC_FLAG=$(detect_vsync_flag)
 VIDEO_CODEC=$(detect_codec)
 
-echo "Configuration: Codec=$VIDEO_CODEC | Vsync=$VSYNC_FLAG"
+echo "Configuration: Codec=$VIDEO_CODEC | Vsync=$VSYNC_FLAG | Audio Normalization=$([ "$normalize_audio" -eq 1 ] && echo "Enabled (Two-Pass)" || echo "Disabled")"
 
 shopt -s nullglob
 files=("$@")

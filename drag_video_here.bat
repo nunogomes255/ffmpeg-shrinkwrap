@@ -133,7 +133,7 @@ echo [2/2] Starting video compression...
 echo.
 
 :: Run the PowerShell optimizer with all arguments
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "shrinkwrap.ps1" -Files %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "shrinkwrap.ps1" %*
 
 echo.
 echo ========================================

@@ -8,3 +8,5 @@ optimized/
 optimization_summary.txt
 .DS_Store
 Thumbs.db
+cat_ALL.sh
+*.txt
