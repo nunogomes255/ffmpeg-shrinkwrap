@@ -1,4 +1,4 @@
-# discord-compressor 📦
+# ffmpeg-shrinkwrap 📦
 
 ![Bash](https://img.shields.io/badge/Bash-4EAA25?style=flat-square&logo=gnu-bash&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5391FE?style=flat-square&logo=powershell&logoColor=white)
@@ -8,7 +8,7 @@
 
 **A constraint-driven video compression pipeline designed for the Discord 10MB file limit.**
 
-`discord-compressor` automatically **compresses an entire directory worth of videos to fit Discord's 10MB limit** (or any target size) using **dynamic bitrate calculation** and intelligent fallback strategies. Works on Linux, macOS, WSL, and native Windows.
+`ffmpeg-shrinkwrap` automatically **compresses an entire directory worth of videos to fit Discord's 10MB limit** (or any target size) using **dynamic bitrate calculation** and intelligent fallback strategies. Works on Linux, macOS, WSL, and native Windows.
 
 Unlike static presets, it calculates exact bitrates and uses a **heuristic** to balance quality against size constraints, automating the "trial and error" process of encoding, retrying, downscaling, and splitting.
 
@@ -75,20 +75,20 @@ Right-click `drag_video_here.bat` → Properties → Unblock → OK
 #### Quick Install (System-Wide)
 ```bash
 # Clone repo
-git clone https://github.com/nunogomes255/discord-compressor.git
-cd discord-compressor
+git clone https://github.com/nunogomes255/ffmpeg-shrinkwrap.git
+cd ffmpeg-shrinkwrap
 
 # Make executable
 chmod +x shrinkwrap
 
 # Install globally
-sudo cp shrinkwrap /usr/local/bin/discord-compressor
+sudo cp shrinkwrap /usr/local/bin/ffmpeg-shrinkwrap
 ```
 
 **Now run from anywhere:**
 ```bash
 cd /path/to/your/videos
-discord-compressor
+ffmpeg-shrinkwrap
 ```
 
 #### Usage
@@ -277,4 +277,5 @@ MIT License. Free to use, modify, and distribute.
 
 
 Built for whoever is tired of manually tweaking replay settings, messing with Medal or using sketchy online converters/compressors. If this saved you time, give it a ⭐!
+
 
