@@ -263,7 +263,7 @@ Issues and PRs welcome! Areas of interest:
 - [ ] Add support for other input formats (MKV, AVI, MOV)
 - [ ] GPU-accelerated encoding as an option(NVENC, QSV, VideoToolbox)
 - [ ] Batch processing UI (progress for multiple files)
-- [ ] Audio loudness normalization (opt-in flag)
+- [ ] Better UI/UX
 
 ---
 
@@ -277,5 +277,6 @@ MIT License. Free to use, modify, and distribute.
 
 
 Built for whoever is tired of manually tweaking replay settings, messing with Medal or using sketchy online converters/compressors. If this saved you time, give it a ⭐!
+
 
 
