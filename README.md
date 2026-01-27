@@ -78,11 +78,9 @@ Right-click `drag_video_here.bat` → Properties → Unblock → OK
 git clone https://github.com/nunogomes255/ffmpeg-shrinkwrap.git
 cd ffmpeg-shrinkwrap
 
-# Make executable
-chmod +x shrinkwrap
-
-# Install globally
+# Install globally and make executable
 sudo cp shrinkwrap /usr/local/bin/ffmpeg-shrinkwrap
+sudo chmod +x /usr/local/bin/ffmpeg-shrinkwrap
 ```
 
 **Now run from anywhere:**
