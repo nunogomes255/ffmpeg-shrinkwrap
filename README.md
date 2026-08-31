@@ -94,7 +94,7 @@ git clone https://github.com/nunogomes255/ffmpeg-shrinkwrap.git
 cd ffmpeg-shrinkwrap
 
 # Install globally and make executable
-sudo cp shrinkwrap /usr/local/bin/ffmpeg-shrinkwrap
+sudo cp shrinkwrap.sh /usr/local/bin/ffmpeg-shrinkwrap
 sudo chmod +x /usr/local/bin/ffmpeg-shrinkwrap
 ```
 
@@ -105,14 +105,14 @@ ffmpeg-shrinkwrap
 ```
 
 #### Usage
-Process all .mp4 files in current directory:
+Process all video files in current directory:
 ```bash
-./shrinkwrap
+./shrinkwrap.sh
 ```
 
 Process specific files:
 ```bash
-./shrinkwrap clip1.mp4 clip2.mp4
+./shrinkwrap.sh clip1.mp4 clip2.mkv
 ```
 
 #### Options
@@ -136,13 +136,13 @@ Process specific files:
 
 #### Examples
 ```bash
-./shrinkwrap clip.mp4                          # Process single file (19.8MB default)
-./shrinkwrap -t 49 -p medium clip.mp4          # Target 50MB Discord Nitro Basic
-./shrinkwrap -c hw clip.mp4                    # Auto-pick best working GPU encoder
-./shrinkwrap -c hevc_nvenc clip.mp4            # Force NVIDIA NVENC HEVC encoder
-./shrinkwrap -l -m clip.mp4                    # Normalize loudness + downmix to mono
-./shrinkwrap -A clip.mp4                       # Strip audio completely (-an)
-./shrinkwrap --config                          # Run interactive setup wizard
+./shrinkwrap.sh clip.mp4                          # Process single file (19.8MB default)
+./shrinkwrap.sh -t 49 -p medium clip.mp4          # Target 50MB Discord Nitro Basic
+./shrinkwrap.sh -c hw clip.mp4                    # Auto-pick best working GPU encoder
+./shrinkwrap.sh -c hevc_nvenc clip.mp4            # Force NVIDIA NVENC HEVC encoder
+./shrinkwrap.sh -l -m clip.mp4                    # Normalize loudness + downmix to mono
+./shrinkwrap.sh -A clip.mp4                       # Strip audio completely (-an)
+./shrinkwrap.sh --config                          # Run interactive setup wizard
 ```
 
 ---
@@ -174,8 +174,8 @@ finer x264/QSV names) passes through unchanged. If you hand it a token from a *d
 valid presets per encoder. The default `slow` is silent.
 
 ```bash
-./shrinkwrap -c hw clip.mp4               # auto-pick the best working GPU encoder
-./shrinkwrap -c hevc_nvenc clip.mp4       # force NVENC HEVC
+./shrinkwrap.sh -c hw clip.mp4               # auto-pick the best working GPU encoder
+./shrinkwrap.sh -c hevc_nvenc clip.mp4       # force NVENC HEVC
 ```
 ```powershell
 .\shrinkwrap.ps1 -Encoder av1_amf -Files clip.mp4    # force AMF AV1
@@ -194,7 +194,7 @@ has: **software `libx265` 2-pass**, no prompt, ever. To make a different encoder
 without retyping the flag, run the one-time setup wizard:
 
 ```bash
-./shrinkwrap --config          # Linux / macOS / WSL / Git Bash
+./shrinkwrap.sh --config          # Linux / macOS / WSL / Git Bash
 ```
 ```powershell
 .\shrinkwrap.ps1 -Config       # Windows
@@ -220,7 +220,7 @@ The file is plain `key = value` (no external dependencies) with sensible default
 
 ```ini
 # ffmpeg-shrinkwrap preferences.
-# Regenerate:  shrinkwrap --config   |   .\shrinkwrap.ps1 -Config     (or edit by hand)
+# Regenerate:  ./shrinkwrap.sh --config   |   .\shrinkwrap.ps1 -Config     (or edit by hand)
 # Delete this file to return to defaults (software x265, 19.8MB target).
 #
 # mode: drives encoder choice when no -c/-Encoder flag is given.

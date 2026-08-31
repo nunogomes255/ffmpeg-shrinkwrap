@@ -125,7 +125,7 @@ $Script:INITIAL_AUDIO_BITRATE_KBPS = 192
 $Script:CRF_RESCUE_VALUE = 28
 $Script:OVERHEAD_KB = 200
 $Script:MAX_VIDEO_BITRATE_KBPS = 50000
-$Script:OUTPUT_DIR = Join-Path $PSScriptRoot "optimized"
+$Script:OUTPUT_DIR = Join-Path (Get-Location).Path "optimized"
 $Script:SUMMARY_FILE = "optimization_summary.txt"
 $Script:AudioChannels = if ($Mono) { 1 } else { 2 } # Stereo by default; -Mono downmixes
 $Script:InputExtensions = @('.mp4', '.mkv', '.mov', '.avi', '.webm', '.m4v', '.flv')
@@ -719,7 +719,7 @@ function Write-Config {
 
     $content = @"
 # ffmpeg-shrinkwrap preferences.
-# Regenerate:  shrinkwrap --config   |   .\shrinkwrap.ps1 -Config     (or edit by hand)
+# Regenerate:  ./shrinkwrap.sh --config   |   .\shrinkwrap.ps1 -Config     (or edit by hand)
 # Delete this file to return to defaults (software x265, 19.8MB target).
 #
 # mode: drives encoder choice when no -c/-Encoder flag is given.
@@ -1232,18 +1232,32 @@ function Optimize-Video {
     Write-ColorOutput "Processing: $InputFile (Original: ${OrigSizeMB}MB)" "Cyan"
     
     if ($OrigSizeMB -lt $Script:MAX_SIZE_MB) {
+        # A non-MP4 input that already fits must still be remuxed: a byte copy would hand
+        # back a Matroska/WebM stream wearing an .mp4 extension, which Discord will not
+        # play inline. If the codecs cannot live in MP4, fall through to a real encode
+        # rather than emit a mislabeled container.
+        $IsMp4 = ([System.IO.Path]::GetExtension($InputFile)).ToLower() -eq '.mp4'
+        $FastPathOk = $true
         if ($NoAudio) {
             # Honor -NoAudio even on the no-encode fast path: stream-copy video, drop audio
-            # (lossless); fall back to a plain copy if the container can't remux.
+            # (lossless); fall back to a plain copy only when the input is already MP4.
             & $Script:FFmpeg -y -i $InputFile -c copy -an -movflags +faststart $OutputFile 2>$null | Out-Null
-            if ($LASTEXITCODE -ne 0) { Copy-Item $InputFile $OutputFile -Force }
-            Record-Summary "$FileName$PartSuffix" $OrigSizeMB (Get-FileSizeMB $OutputFile) "Copied"
-        } else {
+            if ($LASTEXITCODE -ne 0) {
+                if ($IsMp4) { Copy-Item $InputFile $OutputFile -Force } else { $FastPathOk = $false }
+            }
+        } elseif ($IsMp4) {
             Copy-Item $InputFile $OutputFile -Force
-            Record-Summary "$FileName$PartSuffix" $OrigSizeMB $OrigSizeMB "Copied"
+        } else {
+            & $Script:FFmpeg -y -i $InputFile -c copy -movflags +faststart $OutputFile 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) { $FastPathOk = $false }
         }
-        Write-ColorOutput "Copied: $OutputFile" "Green"
-        return $true
+        if ($FastPathOk) {
+            Record-Summary "$FileName$PartSuffix" $OrigSizeMB (Get-FileSizeMB $OutputFile) "Copied"
+            Write-ColorOutput "Copied: $OutputFile" "Green"
+            return $true
+        }
+        Remove-Item $OutputFile -Force -ErrorAction SilentlyContinue
+        Write-ColorOutput "  [Info] Input fits but cannot be remuxed to MP4 losslessly; re-encoding." "Yellow"
     }
     
     $Duration = Get-Duration $InputFile
@@ -1472,9 +1486,11 @@ if (-not $PSBoundParameters.ContainsKey('NoCleanup') -and $Script:CfgNoCleanup -
     $NoCleanup = [switch]::new($true)
 }
 if ($OutputDir) {
-    $Script:OUTPUT_DIR = if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path $PSScriptRoot $OutputDir }
+    $Script:OUTPUT_DIR = if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path (Get-Location).Path $OutputDir }
 } elseif ($Script:CfgOutputDir) {
-    $Script:OUTPUT_DIR = if ([System.IO.Path]::IsPathRooted($Script:CfgOutputDir)) { $Script:CfgOutputDir } else { Join-Path $PSScriptRoot $Script:CfgOutputDir }
+    $Script:OUTPUT_DIR = if ([System.IO.Path]::IsPathRooted($Script:CfgOutputDir)) { $Script:CfgOutputDir } else { Join-Path (Get-Location).Path $Script:CfgOutputDir }
+} else {
+    $Script:OUTPUT_DIR = Join-Path (Get-Location).Path "optimized"
 }
 if ($Script:CfgAudioBitrate) {
     $parsed = 0
@@ -1528,7 +1544,7 @@ Write-Banner $TargetSizeMB "$($Script:VideoCodec) ($($Script:CodecSource))" $Pre
 # Gather files
 if ($Files.Count -eq 0) {
     Write-ColorOutput "No files specified. Scanning current directory for video files..." "Cyan"
-    $Files = Get-ChildItem -Path $PSScriptRoot -File |
+    $Files = Get-ChildItem -Path (Get-Location).Path -File |
         Where-Object { $Script:InputExtensions -contains $_.Extension.ToLower() } |
         Select-Object -ExpandProperty FullName
 }

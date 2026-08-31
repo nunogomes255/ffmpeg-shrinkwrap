@@ -14,7 +14,7 @@ title FFmpeg Shrinkwrap - Discord Video Compressor
 :: ============================================
 echo.
 echo ========================================
-echo   FFmpeg Shrinkwrap v1.0
+echo   FFmpeg Shrinkwrap v2.0
 echo   Compress videos for Discord (20MB)
 echo ========================================
 echo.
@@ -109,11 +109,15 @@ if "%~1"=="" (
     echo.
     echo USAGE:
     echo   1. Drag video files onto this .bat file, OR
-    echo   2. This script will process all .mp4 files in the current folder
+    echo   2. This script will process all video files in the current folder
     echo.
     
-    if exist "*.mp4" (
-        echo .mp4 files detected in current folder.
+    set "FOUND_VIDEOS="
+    for %%e in (mp4 mkv mov avi webm m4v flv) do (
+        if exist "*.%%e" set "FOUND_VIDEOS=1"
+    )
+    if defined FOUND_VIDEOS (
+        echo Video files detected in current folder.
         echo.
         choice /C YN /M "Process all videos in this folder now?"
         if errorlevel 2 (
@@ -125,7 +129,7 @@ if "%~1"=="" (
         )
         echo.
     ) else (
-        echo No .mp4 files found in current folder.
+        echo No video files ^(mp4/mkv/mov/avi/webm/m4v/flv^) found in current folder.
         echo.
         echo TIP: Drag video files onto this .bat file to compress them!
         echo.

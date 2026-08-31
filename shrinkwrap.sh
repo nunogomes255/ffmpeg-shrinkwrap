@@ -106,7 +106,7 @@ write_config() { # <mode> : write conf (preserving existing settings); echo path
 
     local body
     body="# ffmpeg-shrinkwrap preferences.
-# Regenerate:  shrinkwrap --config   |   .\\shrinkwrap.ps1 -Config     (or edit by hand)
+# Regenerate:  ./shrinkwrap.sh --config   |   .\\shrinkwrap.ps1 -Config     (or edit by hand)
 # Delete this file to return to defaults (software x265, 19.8MB target).
 #
 # mode: drives encoder choice when no -c/-Encoder flag is given.
@@ -1098,18 +1098,34 @@ optimize_video() { # Primary Optimization Pipeline: 2-Pass HEVC Encoding.
     say_info "Processing: $input_file (Original: ${orig_size_mb}MB)"
 
     if (( $(echo "$orig_size_mb < $MAX_SIZE_MB" | bc -l) )); then # Input already satisfies constraints
+        # A non-MP4 input that already fits must still be remuxed: a byte copy would hand back
+        # a Matroska/WebM stream wearing an .mp4 extension, which Discord will not play inline.
+        # If the codecs cannot live in MP4, fall through to a real encode instead of emitting a
+        # mislabeled container. (tr, not ${v,,}: bash 3.2 on macOS has no case conversion.)
+        local in_ext fastpath_ok=1
+        in_ext=$(printf '%s' "${input_file##*.}" | tr '[:upper:]' '[:lower:]')
         if [ "$remove_audio" -eq 1 ]; then
             # Honor -A even on the no-encode fast path: stream-copy the video and drop audio
-            # (lossless, no re-encode); fall back to a plain copy if the container can't remux.
-            ffmpeg -y -i "$input_file" -c copy -an -movflags +faststart "$output_file" 2>/dev/null \
-                || cp "$input_file" "$output_file" || { record_summary "$filename$part_suffix" "$orig_size_mb" "N/A" "Copy Fail"; return 1; }
-            record_summary "$filename$part_suffix" "$orig_size_mb" "$(get_file_size_mb "$output_file")" "Copied"
-        else
+            # (lossless, no re-encode); plain copy only when the input is already MP4.
+            if ! ffmpeg -y -i "$input_file" -c copy -an -movflags +faststart "$output_file" 2>/dev/null; then
+                if [ "$in_ext" = "mp4" ]; then
+                    cp "$input_file" "$output_file" || { record_summary "$filename$part_suffix" "$orig_size_mb" "N/A" "Copy Fail"; return 1; }
+                else
+                    fastpath_ok=0
+                fi
+            fi
+        elif [ "$in_ext" = "mp4" ]; then
             cp "$input_file" "$output_file" || { record_summary "$filename$part_suffix" "$orig_size_mb" "N/A" "Copy Fail"; return 1; }
-            record_summary "$filename$part_suffix" "$orig_size_mb" "$orig_size_mb" "Copied"
+        else
+            ffmpeg -y -i "$input_file" -c copy -movflags +faststart "$output_file" 2>/dev/null || fastpath_ok=0
         fi
-        echo "Copied: $output_file"
-        return 0
+        if [ "$fastpath_ok" -eq 1 ]; then
+            record_summary "$filename$part_suffix" "$orig_size_mb" "$(get_file_size_mb "$output_file")" "Copied"
+            echo "Copied: $output_file"
+            return 0
+        fi
+        rm -f "$output_file"
+        echo "  [Info] Input fits but cannot be remuxed to MP4 losslessly; re-encoding."
     fi
 
     local duration
