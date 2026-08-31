@@ -7,6 +7,187 @@ export LC_ALL=C
 # continues to the next file, with the summary always written at the end.
 set -o pipefail # Capture errors even inside pipes
 
+# Resolve the script's own directory (for shrinkwrap.conf); fall back to CWD if unknown.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)
+[ -z "$SCRIPT_DIR" ] && SCRIPT_DIR="."
+
+# Built-in defaults (used when shrinkwrap.conf is absent or a key is missing). The hardware
+# order is AV1-hw -> HEVC-hw; h264_* is intentionally absent (reachable only by explicit
+# selection, never auto-ranked above libx265). Config's hardware_order/software_order override
+# these; mode defaults to software so a config-less run behaves exactly like before.
+DEFAULT_MODE="software"
+DEFAULT_HARDWARE_ORDER="av1_amf av1_nvenc av1_qsv hevc_amf hevc_nvenc hevc_qsv hevc_videotoolbox"
+DEFAULT_SOFTWARE_ORDER="libx265 libx264"
+
+# --- Persisted preferences (shrinkwrap.conf) ----------------------------------
+# Format: `key = value`, `#` comments, space-separated lists. Read precedence:
+# script-dir -> per-user -> built-in defaults. Write: script-dir, else per-user.
+CONFIG_NAME="shrinkwrap.conf"
+CONFIG_FOUND=0
+CONFIG_MODE=""; CONFIG_HARDWARE_ORDER=""; CONFIG_SOFTWARE_ORDER=""
+CONFIG_TARGET_SIZE_MB=""; CONFIG_PRESET=""
+CONFIG_NORMALIZE_AUDIO=""; CONFIG_MONO=""; CONFIG_NO_AUDIO=""
+CONFIG_AUDIO_BITRATE=""; CONFIG_MIN_AUDIO_BITRATE=""
+CONFIG_MIN_VIDEO_BITRATE=""; CONFIG_MAX_RETRIES=""
+CONFIG_CRF_RESCUE_VALUE=""; CONFIG_OUTPUT_DIR=""; CONFIG_NO_CLEANUP=""
+
+trim() { # echo $1 with leading/trailing whitespace removed (pure bash, no subprocess)
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+config_user_dir() { # per-user dir: Windows %APPDATA%, else $XDG_CONFIG_HOME, else ~/.config
+    if [ -n "${APPDATA:-}" ]; then
+        printf '%s' "$APPDATA/ffmpeg-shrinkwrap"
+    elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
+        printf '%s' "$XDG_CONFIG_HOME/ffmpeg-shrinkwrap"
+    else
+        printf '%s' "$HOME/.config/ffmpeg-shrinkwrap"
+    fi
+}
+
+config_read_path() { # echo first existing conf (script-dir, then per-user); empty if none
+    if [ -f "$SCRIPT_DIR/$CONFIG_NAME" ]; then
+        printf '%s' "$SCRIPT_DIR/$CONFIG_NAME"
+    elif [ -f "$(config_user_dir)/$CONFIG_NAME" ]; then
+        printf '%s' "$(config_user_dir)/$CONFIG_NAME"
+    fi
+}
+
+read_config() { # parse the conf at $1 into the CONFIG_* globals (no-op when absent)
+    local path="$1" line key value
+    [ -z "$path" ] && return 0
+    [ -f "$path" ] || return 0
+    CONFIG_FOUND=1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"                          # strip a trailing CR (Windows file)
+        case "$(trim "$line")" in ''|'#'*) continue ;; esac
+        [ "$line" = "${line#*=}" ] && continue        # no '=' on the line -> skip
+        key=$(trim "${line%%=*}")
+        value=$(trim "${line#*=}")
+        case "$key" in
+            mode)              CONFIG_MODE="$value" ;;
+            hardware_order)    CONFIG_HARDWARE_ORDER="$value" ;;
+            software_order)    CONFIG_SOFTWARE_ORDER="$value" ;;
+            target_size_mb)    CONFIG_TARGET_SIZE_MB="$value" ;;
+            preset)            CONFIG_PRESET="$value" ;;
+            normalize_audio)   CONFIG_NORMALIZE_AUDIO="$value" ;;
+            mono)              CONFIG_MONO="$value" ;;
+            no_audio)          CONFIG_NO_AUDIO="$value" ;;
+            audio_bitrate)     CONFIG_AUDIO_BITRATE="$value" ;;
+            min_audio_bitrate) CONFIG_MIN_AUDIO_BITRATE="$value" ;;
+            min_video_bitrate) CONFIG_MIN_VIDEO_BITRATE="$value" ;;
+            max_retries)       CONFIG_MAX_RETRIES="$value" ;;
+            crf_rescue_value)  CONFIG_CRF_RESCUE_VALUE="$value" ;;
+            output_dir)        CONFIG_OUTPUT_DIR="$value" ;;
+            no_cleanup)        CONFIG_NO_CLEANUP="$value" ;;
+        esac
+    done < "$path"
+}
+
+write_config() { # <mode> : write conf (preserving existing settings); echo path, or return 1
+    local new_mode="$1"
+    local hw_order="${CONFIG_HARDWARE_ORDER:-$DEFAULT_HARDWARE_ORDER}"
+    local sw_order="${CONFIG_SOFTWARE_ORDER:-$DEFAULT_SOFTWARE_ORDER}"
+    local target_size="${CONFIG_TARGET_SIZE_MB:-19.8}"
+    local p_val="${CONFIG_PRESET:-slow}"
+    local norm_aud="${CONFIG_NORMALIZE_AUDIO:-false}"
+    local mono_val="${CONFIG_MONO:-false}"
+    local no_aud="${CONFIG_NO_AUDIO:-false}"
+    local aud_bit="${CONFIG_AUDIO_BITRATE:-192}"
+    local min_aud="${CONFIG_MIN_AUDIO_BITRATE:-64}"
+    local min_vid="${CONFIG_MIN_VIDEO_BITRATE:-500}"
+    local max_ret="${CONFIG_MAX_RETRIES:-3}"
+    local crf_val="${CONFIG_CRF_RESCUE_VALUE:-28}"
+    local out_dir="${CONFIG_OUTPUT_DIR:-optimized}"
+    local no_clean="${CONFIG_NO_CLEANUP:-false}"
+
+    local body
+    body="# ffmpeg-shrinkwrap preferences.
+# Regenerate:  shrinkwrap --config   |   .\\shrinkwrap.ps1 -Config     (or edit by hand)
+# Delete this file to return to defaults (software x265, 19.8MB target).
+#
+# mode: drives encoder choice when no -c/-Encoder flag is given.
+#   hardware       - walk hardware_order (GPU); fall back to software_order
+#   software       - walk software_order (x265 first)
+#   software_x264  - force libx264 (maximum compatibility / legacy)
+mode = $new_mode
+
+# Ordered candidates. Each entry is probed; the first that works wins. Reorder/trim freely.
+hardware_order = $hw_order
+software_order = $sw_order
+
+# --- Compression & Speed Defaults ---
+# target_size_mb: target file size in MB (default: 19.8 for Discord 20MB limit)
+# preset: x265/universal preset (slow, medium, fast, faster, etc. default: slow)
+target_size_mb = $target_size
+preset = $p_val
+
+# --- Audio Defaults ---
+# normalize_audio: apply EBU R128 loudness normalization (true/false, default: false)
+# mono: downmix audio to mono to save budget (true/false, default: false)
+# no_audio: strip audio completely (true/false, default: false)
+# audio_bitrate: initial audio bitrate in kbps (default: 192)
+# min_audio_bitrate: audio bitrate floor in kbps (default: 64)
+normalize_audio = $norm_aud
+mono = $mono_val
+no_audio = $no_aud
+audio_bitrate = $aud_bit
+min_audio_bitrate = $min_aud
+
+# --- Output & Fallback Options ---
+# output_dir: destination directory for compressed videos (default: optimized)
+# min_video_bitrate: video bitrate floor in kbps before 720p rescue (default: 500)
+# max_retries: max retry attempts per resolution pass (default: 3)
+# crf_rescue_value: CRF quality value for Phase 3 rescue pass (default: 28)
+# no_cleanup: preserve logs and intermediate pass files (true/false, default: false)
+output_dir = $out_dir
+min_video_bitrate = $min_vid
+max_retries = $max_ret
+crf_rescue_value = $crf_val
+no_cleanup = $no_clean"
+    local sd="$SCRIPT_DIR/$CONFIG_NAME" ud_dir ud
+    ud_dir=$(config_user_dir); ud="$ud_dir/$CONFIG_NAME"
+    # stderr is redirected *before* the output redirect so a failed `> "$sd"` (unwritable
+    # script dir: permission denied, etc.) is suppressed rather than leaking to the terminal.
+    if printf '%s\n' "$body" 2>/dev/null > "$sd"; then
+        printf '%s' "$sd"; return 0
+    elif mkdir -p "$ud_dir" 2>/dev/null && printf '%s\n' "$body" 2>/dev/null > "$ud"; then
+        printf '%s' "$ud"; return 0
+    fi
+    return 1
+}
+
+run_config_wizard() { # interactive: prompt for a default encoder, write conf, exit
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        echo "--config needs an interactive terminal" >&2
+        exit 1
+    fi
+    local answer new_mode saved
+    echo "First-time setup - choose your default encoder:"
+    echo "  [1] Hardware (GPU)    Fast, offloads to GPU. Usually a bit larger / lower-quality at the"
+    echo "                        size cap; hardware AV1/HEVC may not play inline on Discord for"
+    echo "                        everyone. Falls back to software if no GPU encoder works."
+    echo "  [2] Software x265     (Recommended) Best quality at the cap (libx265 2-pass); plays"
+    echo "                        inline on Discord. Slower. Falls back to x264."
+    echo "  [3] Software x264     Maximum compatibility / legacy. Plays everywhere, larger files."
+    printf "Your choice [2]: "
+    read -r answer
+    case "$answer" in
+        1) new_mode="hardware" ;;
+        3) new_mode="software_x264" ;;
+        *) new_mode="software" ;;                      # empty Enter / anything else -> default
+    esac
+    if saved=$(write_config "$new_mode"); then
+        echo "Saved to $saved."
+        exit 0
+    fi
+    echo "ERROR: could not write config (script dir and per-user dir both unwritable)." >&2
+    exit 1
+}
+
 # --- CLI Interface & Argument Parsing ---
 usage() {
     echo "Usage: $0 [options] [files...]"
@@ -19,6 +200,7 @@ usage() {
     echo "  -v <kbps>       Minimum video bitrate floor (default: 500)"
     echo "  -a <kbps>       Minimum audio bitrate floor (default: 64)"
     echo "  -r <retries>    Max encoding retries per pass (default: 3)"
+    echo "  -o <dir>        Output directory (default: optimized)"
     echo "  -n              No cleanup - preserve logs/artifacts for debugging"
     echo "  -l              Normalize audio loudness (EBU R128 / -16 LUFS, two-pass)"
     echo "  -m              Downmix audio to mono (frees budget on voice-only clips)"
@@ -42,17 +224,27 @@ usage() {
     echo "when no -c flag is given; -c always overrides it for that run."
 }
 
-preset="slow"
+# Pre-load configuration so config values act as default arguments
+read_config "$(config_read_path)"
+
+MODE="${CONFIG_MODE:-$DEFAULT_MODE}"
+HARDWARE_ORDER="${CONFIG_HARDWARE_ORDER:-$DEFAULT_HARDWARE_ORDER}"
+SOFTWARE_ORDER="${CONFIG_SOFTWARE_ORDER:-$DEFAULT_SOFTWARE_ORDER}"
+
+preset="${CONFIG_PRESET:-slow}"
 encoder_choice="auto" # auto = software 2-pass (default); hw = probe GPU; or an encoder name
 encoder_explicit=0 # Track whether -c was user-set (distinguishes a config-driven default)
-target_size_mb=19.8
-min_video_bitrate_kbps=500
-min_audio_bitrate_kbps=64
-max_retries=3
-cleanup=1 # Default: Clean artifacts on exit.
-normalize_audio=0 # Default: No audio normalization
-audio_channels=2 # Default: stereo (use -m for mono)
-remove_audio=0 # Default: keep audio (use -A to strip it entirely)
+target_size_mb="${CONFIG_TARGET_SIZE_MB:-19.8}"
+min_video_bitrate_kbps="${CONFIG_MIN_VIDEO_BITRATE:-500}"
+min_audio_bitrate_kbps="${CONFIG_MIN_AUDIO_BITRATE:-64}"
+max_retries="${CONFIG_MAX_RETRIES:-3}"
+cleanup="$([ "${CONFIG_NO_CLEANUP:-}" = "true" ] && echo 0 || echo 1)" # Default: Clean artifacts on exit
+normalize_audio="$([ "${CONFIG_NORMALIZE_AUDIO:-}" = "true" ] && echo 1 || echo 0)"
+audio_channels="$([ "${CONFIG_MONO:-}" = "true" ] && echo 1 || echo 2)"
+remove_audio="$([ "${CONFIG_NO_AUDIO:-}" = "true" ] && echo 1 || echo 0)"
+OUTPUT_DIR="${CONFIG_OUTPUT_DIR:-optimized}"
+INITIAL_AUDIO_BITRATE_KBPS="${CONFIG_AUDIO_BITRATE:-192}"
+CRF_RESCUE_VALUE="${CONFIG_CRF_RESCUE_VALUE:-28}"
 
 # getopts has no long-option support, so pre-scan "$@" for --config, set a flag, and drop
 # it from the positional parameters before getopts runs over the remaining short options.
@@ -67,7 +259,7 @@ for arg in "$@"; do
 done
 set -- "${pruned_args[@]}"
 
-while getopts "c:p:t:v:a:r:nhlmA" opt; do
+while getopts "c:p:t:v:a:r:o:nhlmA" opt; do
     case $opt in
         c) encoder_choice="$OPTARG"; encoder_explicit=1 ;;
         p) preset="$OPTARG" ;;
@@ -75,6 +267,7 @@ while getopts "c:p:t:v:a:r:nhlmA" opt; do
         v) min_video_bitrate_kbps="$OPTARG" ;;
         a) min_audio_bitrate_kbps="$OPTARG" ;;
         r) max_retries="$OPTARG" ;;
+        o) OUTPUT_DIR="$OPTARG" ;;
         n) cleanup=0 ;; # Debug mode enabled
         l) normalize_audio=1 ;; # Enable audio normalization
         m) audio_channels=1 ;; # Downmix audio to mono
@@ -86,11 +279,10 @@ done
 shift $((OPTIND - 1))
 
 # --- Configuration Constants ---
-MAX_SIZE_MB=20.0
-INITIAL_AUDIO_BITRATE_KBPS=192
+MAX_SIZE_MB=$(echo "$target_size_mb" | awk '{print ($1 > int($1) ? int($1)+1 : int($1))}')
+[ -z "$MAX_SIZE_MB" ] || [ "$MAX_SIZE_MB" -lt 1 ] && MAX_SIZE_MB=20
 OVERHEAD_KB=200
 MAX_VIDEO_BITRATE_KBPS=50000
-OUTPUT_DIR="./optimized"
 SUMMARY_FILE="optimization_summary.txt"
 
 # --- UI: colors + glyphs (degrade to plain ASCII when piped or NO_COLOR is set) ---
@@ -369,7 +561,7 @@ build_hw_video_args() { # <family> <mode> <bitrate_kbps> <maxrate_kbps>
             printf -- "-rc vbr -multipass fullres"
             [ -n "$vp" ] && printf -- " -preset %s" "$vp"
             if [ "$mode" = cq ]; then
-                printf -- " -cq 28 -b:v 0 -maxrate %sk -bufsize %sk" "$maxrate" "$bufsize"
+                printf -- " -cq %s -b:v 0 -maxrate %sk -bufsize %sk" "${CRF_RESCUE_VALUE:-28}" "$maxrate" "$bufsize"
             else
                 printf -- " -b:v %sk -maxrate %sk -bufsize %sk" "$bitrate" "$maxrate" "$bufsize"
             fi
@@ -388,7 +580,7 @@ build_hw_video_args() { # <family> <mode> <bitrate_kbps> <maxrate_kbps>
         qsv)
             [ -n "$vp" ] && printf -- "-preset %s " "$vp"
             if [ "$mode" = cq ]; then
-                printf -- "-global_quality 28 -maxrate %sk -bufsize %sk" "$maxrate" "$bufsize"
+                printf -- "-global_quality %s -maxrate %sk -bufsize %sk" "${CRF_RESCUE_VALUE:-28}" "$maxrate" "$bufsize"
             else
                 printf -- "-b:v %sk -maxrate %sk -bufsize %sk" "$bitrate" "$maxrate" "$bufsize"
             fi
@@ -419,123 +611,6 @@ probe_encoder() { # <encoder>
     fi
     ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc=s=256x144:d=0.1 -frames:v 1 \
         -c:v "$enc" "${rc[@]}" -f null - >/dev/null 2>&1
-}
-
-# Built-in defaults (used when shrinkwrap.conf is absent or a key is missing). The hardware
-# order is AV1-hw -> HEVC-hw; h264_* is intentionally absent (reachable only by explicit
-# selection, never auto-ranked above libx265). Config's hardware_order/software_order override
-# these; mode defaults to software so a config-less run behaves exactly like before.
-DEFAULT_MODE="software"
-DEFAULT_HARDWARE_ORDER="av1_amf av1_nvenc av1_qsv hevc_amf hevc_nvenc hevc_qsv hevc_videotoolbox"
-DEFAULT_SOFTWARE_ORDER="libx265 libx264"
-
-# --- Persisted preferences (shrinkwrap.conf) ----------------------------------
-# Format: `key = value`, `#` comments, space-separated lists. Read precedence:
-# script-dir -> per-user -> built-in defaults. Write: script-dir, else per-user.
-CONFIG_NAME="shrinkwrap.conf"
-CONFIG_FOUND=0
-CONFIG_MODE=""; CONFIG_HARDWARE_ORDER=""; CONFIG_SOFTWARE_ORDER=""
-
-trim() { # echo $1 with leading/trailing whitespace removed (pure bash, no subprocess)
-    local s="$1"
-    s="${s#"${s%%[![:space:]]*}"}"
-    s="${s%"${s##*[![:space:]]}"}"
-    printf '%s' "$s"
-}
-
-config_user_dir() { # per-user dir: Windows %APPDATA%, else $XDG_CONFIG_HOME, else ~/.config
-    if [ -n "${APPDATA:-}" ]; then
-        printf '%s' "$APPDATA/ffmpeg-shrinkwrap"
-    elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
-        printf '%s' "$XDG_CONFIG_HOME/ffmpeg-shrinkwrap"
-    else
-        printf '%s' "$HOME/.config/ffmpeg-shrinkwrap"
-    fi
-}
-
-config_read_path() { # echo first existing conf (script-dir, then per-user); empty if none
-    if [ -f "$SCRIPT_DIR/$CONFIG_NAME" ]; then
-        printf '%s' "$SCRIPT_DIR/$CONFIG_NAME"
-    elif [ -f "$(config_user_dir)/$CONFIG_NAME" ]; then
-        printf '%s' "$(config_user_dir)/$CONFIG_NAME"
-    fi
-}
-
-read_config() { # parse the conf at $1 into the CONFIG_* globals (no-op when absent)
-    local path="$1" line key value
-    [ -z "$path" ] && return 0
-    [ -f "$path" ] || return 0
-    CONFIG_FOUND=1
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%$'\r'}"                          # strip a trailing CR (Windows file)
-        case "$(trim "$line")" in ''|'#'*) continue ;; esac
-        [ "$line" = "${line#*=}" ] && continue        # no '=' on the line -> skip
-        key=$(trim "${line%%=*}")
-        value=$(trim "${line#*=}")
-        case "$key" in
-            mode)           CONFIG_MODE="$value" ;;
-            hardware_order) CONFIG_HARDWARE_ORDER="$value" ;;
-            software_order) CONFIG_SOFTWARE_ORDER="$value" ;;
-        esac
-    done < "$path"
-}
-
-write_config() { # <mode> : write conf (preserving existing lists); echo path, or return 1
-    local new_mode="$1"
-    local hw_order="${CONFIG_HARDWARE_ORDER:-$DEFAULT_HARDWARE_ORDER}"
-    local sw_order="${CONFIG_SOFTWARE_ORDER:-$DEFAULT_SOFTWARE_ORDER}"
-    local body
-    body="# ffmpeg-shrinkwrap preferences.
-# Regenerate:  shrinkwrap --config   |   .\\shrinkwrap.ps1 -Config     (or edit by hand)
-# Delete this file to return to defaults (software x265).
-#
-# mode: drives encoder choice when no -c/-Encoder flag is given.
-#   hardware       - walk hardware_order (GPU); fall back to software_order
-#   software       - walk software_order (x265 first)
-#   software_x264  - force libx264 (maximum compatibility / legacy)
-mode = $new_mode
-
-# Ordered candidates. Each entry is probed; the first that works wins. Reorder/trim freely.
-hardware_order = $hw_order
-software_order = $sw_order"
-    local sd="$SCRIPT_DIR/$CONFIG_NAME" ud_dir ud
-    ud_dir=$(config_user_dir); ud="$ud_dir/$CONFIG_NAME"
-    # stderr is redirected *before* the output redirect so a failed `> "$sd"` (unwritable
-    # script dir: permission denied, etc.) is suppressed rather than leaking to the terminal.
-    if printf '%s\n' "$body" 2>/dev/null > "$sd"; then
-        printf '%s' "$sd"; return 0
-    elif mkdir -p "$ud_dir" 2>/dev/null && printf '%s\n' "$body" 2>/dev/null > "$ud"; then
-        printf '%s' "$ud"; return 0
-    fi
-    return 1
-}
-
-run_config_wizard() { # interactive: prompt for a default encoder, write conf, exit
-    if [ ! -t 0 ] || [ ! -t 1 ]; then
-        echo "--config needs an interactive terminal" >&2
-        exit 1
-    fi
-    local answer new_mode saved
-    echo "First-time setup - choose your default encoder:"
-    echo "  [1] Hardware (GPU)    Fast, offloads to GPU. Usually a bit larger / lower-quality at the"
-    echo "                        size cap; hardware AV1/HEVC may not play inline on Discord for"
-    echo "                        everyone. Falls back to software if no GPU encoder works."
-    echo "  [2] Software x265     (Recommended) Best quality at the cap (libx265 2-pass); plays"
-    echo "                        inline on Discord. Slower. Falls back to x264."
-    echo "  [3] Software x264     Maximum compatibility / legacy. Plays everywhere, larger files."
-    printf "Your choice [2]: "
-    read -r answer
-    case "$answer" in
-        1) new_mode="hardware" ;;
-        3) new_mode="software_x264" ;;
-        *) new_mode="software" ;;                      # empty Enter / anything else -> default
-    esac
-    if saved=$(write_config "$new_mode"); then
-        echo "Saved to $saved."
-        exit 0
-    fi
-    echo "ERROR: could not write config (script dir and per-user dir both unwritable)." >&2
-    exit 1
 }
 
 select_encoder() { # Sets globals VIDEO_CODEC + CODEC_FAMILY + CODEC_SOURCE.
@@ -887,15 +962,15 @@ rescue_video() { # Fallback Strategy: Downscale to 720p to maintain bitrate dens
         retries=$((retries + 1))
     done
 
-    # --- 4. Phase 3: Last Resort capped CRF 28 @ 720p ---
+    # --- 4. Phase 3: Last Resort capped CRF rescue @ 720p ---
     local crf_maxrate_kbps=$(echo "scale=0; ($target_size_bytes - $(audio_budget_bytes 64 "$duration") - $overhead_bytes) * 8 / $duration / 1000" | bc -l)
     if [ "$crf_maxrate_kbps" -lt "$min_video_bitrate_kbps" ]; then
         crf_maxrate_kbps=$min_video_bitrate_kbps
     fi
     local crf_bufsize_kbps=$((crf_maxrate_kbps * 2))
-    echo "  [Rescue] Phase 3: Last resort capped CRF 28 @ 720p (maxrate ${crf_maxrate_kbps}k)..."
+    echo "  [Rescue] Phase 3: Last resort capped CRF ${CRF_RESCUE_VALUE:-28} @ 720p (maxrate ${crf_maxrate_kbps}k)..."
     if [ "$CODEC_FAMILY" = software ]; then
-    run_with_progress "CRF Pass" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -crf 28 -maxrate "${crf_maxrate_kbps}k" -bufsize "${crf_bufsize_kbps}k" -preset "$preset" \
+    run_with_progress "CRF Pass" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -crf "${CRF_RESCUE_VALUE:-28}" -maxrate "${crf_maxrate_kbps}k" -bufsize "${crf_bufsize_kbps}k" -preset "$preset" \
         -vf "scale='min(1280,iw)':-2" $(audio_out_args 64) -map_metadata 0 -movflags +faststart "$temp_file" 2>/dev/null
     else
         hw_encode "$input_file" "CRF Pass" "$duration" cq "$crf_maxrate_kbps" "$crf_maxrate_kbps" "scale='min(1280,iw)':-2" 64 "$temp_file" $audio_filter_args
@@ -1168,17 +1243,17 @@ optimize_video() { # Primary Optimization Pipeline: 2-Pass HEVC Encoding.
         rm -f "$temp_file" 2>/dev/null # Cleanup for retry
     done
     
-    # CRF Rescue (capped): CRF 28 quality with a VBV cap so it cannot overshoot the
+    # CRF Rescue (capped): CRF rescue quality with a VBV cap so it cannot overshoot the
     # target, and isn't artificially size-limited when the content is easy.
     local crf_maxrate_kbps=$(echo "scale=0; ($target_size_bytes - $(audio_budget_bytes 64 "$duration") - $overhead_bytes) * 8 / $duration / 1000" | bc -l)
     if [ "$crf_maxrate_kbps" -lt "$min_video_bitrate_kbps" ]; then
         crf_maxrate_kbps=$min_video_bitrate_kbps
     fi
     local crf_bufsize_kbps=$((crf_maxrate_kbps * 2))
-    echo "  [Info] Attempting capped CRF 28 rescue (maxrate ${crf_maxrate_kbps}k) before splitting..."
+    echo "  [Info] Attempting capped CRF ${CRF_RESCUE_VALUE:-28} rescue (maxrate ${crf_maxrate_kbps}k) before splitting..."
 
     if [ "$CODEC_FAMILY" = software ]; then
-    run_with_progress "CRF Pass" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -crf 28 -maxrate "${crf_maxrate_kbps}k" -bufsize "${crf_bufsize_kbps}k" -preset "$preset" \
+    run_with_progress "CRF Pass" "$duration" ffmpeg -y -i "$input_file" $VSYNC_FLAG -c:v "$VIDEO_CODEC" -pix_fmt yuv420p -crf "${CRF_RESCUE_VALUE:-28}" -maxrate "${crf_maxrate_kbps}k" -bufsize "${crf_bufsize_kbps}k" -preset "$preset" \
         -vf "scale='min(1920,iw)':-2" $(audio_out_args 64) -map_metadata 0 -movflags +faststart "$temp_file" 2>/dev/null
     else
         hw_encode "$input_file" "CRF Pass" "$duration" cq "$crf_maxrate_kbps" "$crf_maxrate_kbps" "scale='min(1920,iw)':-2" 64 "$temp_file" $audio_filter_args
@@ -1205,16 +1280,6 @@ optimize_video() { # Primary Optimization Pipeline: 2-Pass HEVC Encoding.
 
 # --- Execution Entry Point ---
 SECONDS=0 # Bash builtin stopwatch for the end-of-run tally
-
-# Resolve the script's own directory (for shrinkwrap.conf); fall back to CWD if unknown.
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)
-[ -z "$SCRIPT_DIR" ] && SCRIPT_DIR="."
-
-# Load persisted preferences (script-dir -> per-user -> built-in defaults).
-read_config "$(config_read_path)"
-MODE="${CONFIG_MODE:-$DEFAULT_MODE}"
-HARDWARE_ORDER="${CONFIG_HARDWARE_ORDER:-$DEFAULT_HARDWARE_ORDER}"
-SOFTWARE_ORDER="${CONFIG_SOFTWARE_ORDER:-$DEFAULT_SOFTWARE_ORDER}"
 
 # `--config` is pure setup: run the wizard, write the conf, and exit before any processing
 # (and before check_dependencies, so it works even where bc/ffmpeg are absent).

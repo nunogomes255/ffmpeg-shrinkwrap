@@ -51,6 +51,9 @@
     Remove audio entirely (-an). Frees the whole size budget for video. Overrides -NormalizeAudio
     and -Mono (there is no audio to process).
 
+.PARAMETER OutputDir
+    Custom output directory for compressed videos. Default: .\optimized
+
 .PARAMETER Config
     Launch the interactive setup wizard: choose a default encoder, write shrinkwrap.conf,
     then exit without processing any files. Re-run anytime to reconfigure. Requires an
@@ -105,6 +108,7 @@ param(
     [int]$MinVideoBitrate = 500,
     [int]$MinAudioBitrate = 64,
     [int]$MaxRetries = 3,
+    [string]$OutputDir = $null,
     [switch]$NoCleanup,
     [switch]$NormalizeAudio,
     [switch]$Mono,
@@ -118,6 +122,7 @@ $ProgressPreference = "SilentlyContinue" # Disable built-in progress for speed
 # --- Configuration Constants ---
 $Script:MAX_SIZE_MB = 20.0
 $Script:INITIAL_AUDIO_BITRATE_KBPS = 192
+$Script:CRF_RESCUE_VALUE = 28
 $Script:OVERHEAD_KB = 200
 $Script:MAX_VIDEO_BITRATE_KBPS = 50000
 $Script:OUTPUT_DIR = Join-Path $PSScriptRoot "optimized"
@@ -575,7 +580,7 @@ function Build-HwVideoArgs {
         'nvenc' {
             $a += '-rc','vbr','-multipass','fullres'
             if ($vp) { $a += '-preset',$vp }
-            if ($Mode -eq 'cq') { $a += '-cq','28','-b:v','0','-maxrate',"${MaxRate}k",'-bufsize',"${BufSize}k" }
+            if ($Mode -eq 'cq') { $a += '-cq',"$($Script:CRF_RESCUE_VALUE)",'-b:v','0','-maxrate',"${MaxRate}k",'-bufsize',"${BufSize}k" }
             else                { $a += '-b:v',"${Bitrate}k",'-maxrate',"${MaxRate}k",'-bufsize',"${BufSize}k" }
         }
         'amf' {
@@ -587,7 +592,7 @@ function Build-HwVideoArgs {
         }
         'qsv' {
             if ($vp) { $a += '-preset',$vp }
-            if ($Mode -eq 'cq') { $a += '-global_quality','28','-maxrate',"${MaxRate}k",'-bufsize',"${BufSize}k" }
+            if ($Mode -eq 'cq') { $a += '-global_quality',"$($Script:CRF_RESCUE_VALUE)",'-maxrate',"${MaxRate}k",'-bufsize',"${BufSize}k" }
             else                { $a += '-b:v',"${Bitrate}k",'-maxrate',"${MaxRate}k",'-bufsize',"${BufSize}k" }
         }
         'videotoolbox' {
@@ -653,6 +658,11 @@ function Get-ConfigReadPath {
 function Read-Config {
     # Populate raw $Script:Cfg* (+ ConfigFound) and effective Mode/HardwareOrder/SoftwareOrder.
     $Script:CfgMode = $null; $Script:CfgHwOrder = $null; $Script:CfgSwOrder = $null
+    $Script:CfgTargetSizeMB = $null; $Script:CfgPreset = $null
+    $Script:CfgNormalizeAudio = $null; $Script:CfgMono = $null; $Script:CfgNoAudio = $null
+    $Script:CfgAudioBitrate = $null; $Script:CfgMinAudioBitrate = $null
+    $Script:CfgMinVideoBitrate = $null; $Script:CfgMaxRetries = $null
+    $Script:CfgCrfRescueValue = $null; $Script:CfgOutputDir = $null; $Script:CfgNoCleanup = $null
     $Script:ConfigFound = $false
     $path = Get-ConfigReadPath
     if ($path) {
@@ -665,9 +675,21 @@ function Read-Config {
             $key   = $line.Substring(0, $eq).Trim()
             $value = $line.Substring($eq + 1).Trim()
             switch ($key) {
-                'mode'           { $Script:CfgMode    = $value }
-                'hardware_order' { $Script:CfgHwOrder = $value }
-                'software_order' { $Script:CfgSwOrder = $value }
+                'mode'              { $Script:CfgMode              = $value }
+                'hardware_order'    { $Script:CfgHwOrder           = $value }
+                'software_order'    { $Script:CfgSwOrder           = $value }
+                'target_size_mb'    { $Script:CfgTargetSizeMB      = $value }
+                'preset'            { $Script:CfgPreset            = $value }
+                'normalize_audio'   { $Script:CfgNormalizeAudio    = $value }
+                'mono'              { $Script:CfgMono              = $value }
+                'no_audio'          { $Script:CfgNoAudio           = $value }
+                'audio_bitrate'     { $Script:CfgAudioBitrate      = $value }
+                'min_audio_bitrate' { $Script:CfgMinAudioBitrate   = $value }
+                'min_video_bitrate' { $Script:CfgMinVideoBitrate   = $value }
+                'max_retries'       { $Script:CfgMaxRetries        = $value }
+                'crf_rescue_value'  { $Script:CfgCrfRescueValue    = $value }
+                'output_dir'        { $Script:CfgOutputDir         = $value }
+                'no_cleanup'        { $Script:CfgNoCleanup         = $value }
             }
         }
     }
@@ -678,14 +700,27 @@ function Read-Config {
 }
 
 function Write-Config {
-    # <NewMode> : write conf preserving existing lists; return the path written, or $null.
+    # <NewMode> : write conf preserving existing settings; return the path written, or $null.
     param([string]$NewMode)
     $hwOrder = if ($Script:CfgHwOrder) { $Script:CfgHwOrder } else { ($Script:HwHierarchy -join ' ') }
     $swOrder = if ($Script:CfgSwOrder) { $Script:CfgSwOrder } else { ($Script:DEFAULT_SOFTWARE_ORDER -join ' ') }
+    $targetSize = if ($Script:CfgTargetSizeMB) { $Script:CfgTargetSizeMB } else { "19.8" }
+    $preset = if ($Script:CfgPreset) { $Script:CfgPreset } else { "slow" }
+    $normAudio = if ($Script:CfgNormalizeAudio) { $Script:CfgNormalizeAudio } else { "false" }
+    $mono = if ($Script:CfgMono) { $Script:CfgMono } else { "false" }
+    $noAudio = if ($Script:CfgNoAudio) { $Script:CfgNoAudio } else { "false" }
+    $audBitrate = if ($Script:CfgAudioBitrate) { $Script:CfgAudioBitrate } else { "192" }
+    $minAudBitrate = if ($Script:CfgMinAudioBitrate) { $Script:CfgMinAudioBitrate } else { "64" }
+    $minVidBitrate = if ($Script:CfgMinVideoBitrate) { $Script:CfgMinVideoBitrate } else { "500" }
+    $retries = if ($Script:CfgMaxRetries) { $Script:CfgMaxRetries } else { "3" }
+    $crfRescue = if ($Script:CfgCrfRescueValue) { $Script:CfgCrfRescueValue } else { "28" }
+    $outDir = if ($Script:CfgOutputDir) { $Script:CfgOutputDir } else { "optimized" }
+    $noClean = if ($Script:CfgNoCleanup) { $Script:CfgNoCleanup } else { "false" }
+
     $content = @"
 # ffmpeg-shrinkwrap preferences.
 # Regenerate:  shrinkwrap --config   |   .\shrinkwrap.ps1 -Config     (or edit by hand)
-# Delete this file to return to defaults (software x265).
+# Delete this file to return to defaults (software x265, 19.8MB target).
 #
 # mode: drives encoder choice when no -c/-Encoder flag is given.
 #   hardware       - walk hardware_order (GPU); fall back to software_order
@@ -696,6 +731,36 @@ mode = $NewMode
 # Ordered candidates. Each entry is probed; the first that works wins. Reorder/trim freely.
 hardware_order = $hwOrder
 software_order = $swOrder
+
+# --- Compression & Speed Defaults ---
+# target_size_mb: target file size in MB (default: 19.8 for Discord 20MB limit)
+# preset: x265/universal preset (slow, medium, fast, faster, etc. default: slow)
+target_size_mb = $targetSize
+preset = $preset
+
+# --- Audio Defaults ---
+# normalize_audio: apply EBU R128 loudness normalization (true/false, default: false)
+# mono: downmix audio to mono to save budget (true/false, default: false)
+# no_audio: strip audio completely (true/false, default: false)
+# audio_bitrate: initial audio bitrate in kbps (default: 192)
+# min_audio_bitrate: audio bitrate floor in kbps (default: 64)
+normalize_audio = $normAudio
+mono = $mono
+no_audio = $noAudio
+audio_bitrate = $audBitrate
+min_audio_bitrate = $minAudBitrate
+
+# --- Output & Fallback Options ---
+# output_dir: destination directory for compressed videos (default: optimized)
+# min_video_bitrate: video bitrate floor in kbps before 720p rescue (default: 500)
+# max_retries: max retry attempts per resolution pass (default: 3)
+# crf_rescue_value: CRF quality value for Phase 3 rescue pass (default: 28)
+# no_cleanup: preserve logs and intermediate pass files (true/false, default: false)
+output_dir = $outDir
+min_video_bitrate = $minVidBitrate
+max_retries = $retries
+crf_rescue_value = $crfRescue
+no_cleanup = $noClean
 "@
     # UTF-8 without BOM so the Bash port reads it cleanly (the conf is shared cross-port).
     $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -1029,15 +1094,15 @@ function Invoke-RescueMode {
         $Retries++
     }
     
-    # Phase 3: Last Resort capped CRF 28 @ 720p
+    # Phase 3: Last Resort capped CRF rescue @ 720p
     $CrfMaxRate = [math]::Floor((($TargetSizeBytes - (Get-AudioBudgetBytes 64 $Duration) - $OverheadBytes) * 8 / $Duration) / 1000)
     if ($CrfMaxRate -lt $MinVideoBitrate) { $CrfMaxRate = $MinVideoBitrate }
     $CrfBufSize = $CrfMaxRate * 2
-    Write-ColorOutput "  [Rescue] Phase 3: Last resort capped CRF 28 @ 720p (maxrate ${CrfMaxRate}k)..." "Yellow"
+    Write-ColorOutput "  [Rescue] Phase 3: Last resort capped CRF $($Script:CRF_RESCUE_VALUE) @ 720p (maxrate ${CrfMaxRate}k)..." "Yellow"
 
     Show-Progress "CRF Pass" "Encoding" 0
     $ExitCodeCRF = Invoke-FFmpegEncode -InputFile $InputFile -OutputFile $TempFile `
-        -VideoParams @{ CRF=28; MaxRate=$CrfMaxRate; BufSize=$CrfBufSize; Preset=$Preset; Scale="scale='min(1280,iw)':-2" } `
+        -VideoParams @{ CRF=$Script:CRF_RESCUE_VALUE; MaxRate=$CrfMaxRate; BufSize=$CrfBufSize; Preset=$Preset; Scale="scale='min(1280,iw)':-2" } `
         -AudioParams @{ Bitrate=64; NormFilter=$AudioFilter }
     Show-Progress "CRF Pass" "Encoding" 100
     Write-Host ""
@@ -1331,16 +1396,16 @@ function Optimize-Video {
         Remove-Item $TempFile -ErrorAction SilentlyContinue
     }
     
-    # CRF Rescue (capped): CRF 28 quality with a VBV cap so it cannot overshoot the
+    # CRF Rescue (capped): CRF rescue quality with a VBV cap so it cannot overshoot the
     # target, and isn't artificially size-limited when the content is easy.
     $CrfMaxRate = [math]::Floor((($TargetSizeBytes - (Get-AudioBudgetBytes 64 $Duration) - $OverheadBytes) * 8 / $Duration) / 1000)
     if ($CrfMaxRate -lt $MinVideoBitrate) { $CrfMaxRate = $MinVideoBitrate }
     $CrfBufSize = $CrfMaxRate * 2
-    Write-ColorOutput "  [Info] Attempting capped CRF 28 rescue (maxrate ${CrfMaxRate}k) before splitting..." "Yellow"
+    Write-ColorOutput "  [Info] Attempting capped CRF $($Script:CRF_RESCUE_VALUE) rescue (maxrate ${CrfMaxRate}k) before splitting..." "Yellow"
 
     Show-Progress "CRF Pass" "Encoding" 0
     $ExitCodeCRF = Invoke-FFmpegEncode -InputFile $InputFile -OutputFile $TempFile `
-        -VideoParams @{ CRF=28; MaxRate=$CrfMaxRate; BufSize=$CrfBufSize; Preset=$Preset; Scale="scale='min(1920,iw)':-2" } `
+        -VideoParams @{ CRF=$Script:CRF_RESCUE_VALUE; MaxRate=$CrfMaxRate; BufSize=$CrfBufSize; Preset=$Preset; Scale="scale='min(1920,iw)':-2" } `
         -AudioParams @{ Bitrate=64; NormFilter=$AudioFilter }
     Show-Progress "CRF Pass" "Encoding" 100
     Write-Host ""
@@ -1370,6 +1435,57 @@ Read-Config
 if ($Config) {
     Invoke-ConfigWizard
 }
+
+# Apply persisted preferences if CLI arguments were not explicitly supplied
+if (-not $PSBoundParameters.ContainsKey('TargetSizeMB') -and $Script:CfgTargetSizeMB) {
+    $parsed = 0.0
+    if ([double]::TryParse($Script:CfgTargetSizeMB, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed) -and $parsed -gt 0) {
+        $TargetSizeMB = $parsed
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('Preset') -and $Script:CfgPreset) {
+    $Preset = $Script:CfgPreset
+}
+if (-not $PSBoundParameters.ContainsKey('NormalizeAudio') -and $Script:CfgNormalizeAudio -eq 'true') {
+    $NormalizeAudio = [switch]::new($true)
+}
+if (-not $PSBoundParameters.ContainsKey('Mono') -and $Script:CfgMono -eq 'true') {
+    $Mono = [switch]::new($true)
+    $Script:AudioChannels = 1
+}
+if (-not $PSBoundParameters.ContainsKey('NoAudio') -and $Script:CfgNoAudio -eq 'true') {
+    $NoAudio = [switch]::new($true)
+}
+if (-not $PSBoundParameters.ContainsKey('MinVideoBitrate') -and $Script:CfgMinVideoBitrate) {
+    $parsed = 0
+    if ([int]::TryParse($Script:CfgMinVideoBitrate, [ref]$parsed) -and $parsed -gt 0) { $MinVideoBitrate = $parsed }
+}
+if (-not $PSBoundParameters.ContainsKey('MinAudioBitrate') -and $Script:CfgMinAudioBitrate) {
+    $parsed = 0
+    if ([int]::TryParse($Script:CfgMinAudioBitrate, [ref]$parsed) -and $parsed -gt 0) { $MinAudioBitrate = $parsed }
+}
+if (-not $PSBoundParameters.ContainsKey('MaxRetries') -and $Script:CfgMaxRetries) {
+    $parsed = 0
+    if ([int]::TryParse($Script:CfgMaxRetries, [ref]$parsed) -and $parsed -gt 0) { $MaxRetries = $parsed }
+}
+if (-not $PSBoundParameters.ContainsKey('NoCleanup') -and $Script:CfgNoCleanup -eq 'true') {
+    $NoCleanup = [switch]::new($true)
+}
+if ($OutputDir) {
+    $Script:OUTPUT_DIR = if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path $PSScriptRoot $OutputDir }
+} elseif ($Script:CfgOutputDir) {
+    $Script:OUTPUT_DIR = if ([System.IO.Path]::IsPathRooted($Script:CfgOutputDir)) { $Script:CfgOutputDir } else { Join-Path $PSScriptRoot $Script:CfgOutputDir }
+}
+if ($Script:CfgAudioBitrate) {
+    $parsed = 0
+    if ([int]::TryParse($Script:CfgAudioBitrate, [ref]$parsed) -and $parsed -gt 0) { $Script:INITIAL_AUDIO_BITRATE_KBPS = $parsed }
+}
+if ($Script:CfgCrfRescueValue) {
+    $parsed = 0
+    if ([int]::TryParse($Script:CfgCrfRescueValue, [ref]$parsed) -and $parsed -gt 0) { $Script:CRF_RESCUE_VALUE = $parsed }
+}
+
+$Script:MAX_SIZE_MB = [math]::Ceiling($TargetSizeMB)
 
 # Setup
 if (-not (Test-Path $Script:OUTPUT_DIR)) {

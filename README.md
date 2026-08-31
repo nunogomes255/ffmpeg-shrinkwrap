@@ -68,6 +68,7 @@ Unlike static presets, it calculates exact bitrates and uses a **heuristic** to 
 -NormalizeAudio          Loudness-normalize audio (EBU R128, -16 LUFS, two-pass)
 -Mono                    Downmix audio to mono (frees budget on voice-only clips)
 -NoAudio                 Remove audio entirely (-an); frees the whole budget for video
+-OutputDir <string>      Output directory path (default: optimized)
 -NoCleanup               Keep logs and temp files for debugging
 -Config                  Setup wizard: pick/persist a default encoder, then exit
                          (see "Saved preferences" below)
@@ -126,6 +127,7 @@ Process specific files:
 -l            Normalize audio loudness (EBU R128 / -16 LUFS, two-pass)
 -m            Downmix audio to mono (frees budget on voice-only clips)
 -A            Remove audio entirely (-an); frees the whole budget for video
+-o <string>   Output directory path (default: optimized)
 -n            No cleanup - preserve logs/temp files for debugging
 -h            Display help
 --config      Setup wizard: pick/persist a default encoder, then exit
@@ -214,17 +216,76 @@ wins over the built-in default (software x265).
 | `hardware` | Walk `hardware_order` (GPU), probing each; fall back to software if none work. |
 | `software_x264` | Force `libx264` -- maximum compatibility / legacy, plays everywhere, larger files. |
 
-The file is plain `key = value` (no dependencies), with two editable, ordered, space-separated
-lists -- reorder or trim them freely:
+The file is plain `key = value` (no external dependencies) with sensible defaults. Any setting omitted from the file falls back to built-in defaults:
 
 ```ini
+# ffmpeg-shrinkwrap preferences.
+# Regenerate:  shrinkwrap --config   |   .\shrinkwrap.ps1 -Config     (or edit by hand)
+# Delete this file to return to defaults (software x265, 19.8MB target).
+#
+# mode: drives encoder choice when no -c/-Encoder flag is given.
+#   hardware       - walk hardware_order (GPU); fall back to software_order
+#   software       - walk software_order (x265 first)
+#   software_x264  - force libx264 (maximum compatibility / legacy)
 mode = software
+
+# Ordered candidates. Each entry is probed; the first that works wins. Reorder/trim freely.
 hardware_order = av1_amf av1_nvenc av1_qsv hevc_amf hevc_nvenc hevc_qsv hevc_videotoolbox
 software_order = libx265 libx264
+
+# --- Compression & Speed Defaults ---
+# target_size_mb: target file size in MB (default: 19.8 for Discord 20MB limit)
+# preset: x265/universal preset (slow, medium, fast, faster, etc. default: slow)
+target_size_mb = 19.8
+preset = slow
+
+# --- Audio Defaults ---
+# normalize_audio: apply EBU R128 loudness normalization (true/false, default: false)
+# mono: downmix audio to mono to save budget (true/false, default: false)
+# no_audio: strip audio completely (true/false, default: false)
+# audio_bitrate: initial audio bitrate in kbps (default: 192)
+# min_audio_bitrate: audio bitrate floor in kbps (default: 64)
+normalize_audio = false
+mono = false
+no_audio = false
+audio_bitrate = 192
+min_audio_bitrate = 64
+
+# --- Output & Fallback Options ---
+# output_dir: destination directory for compressed videos (default: optimized)
+# min_video_bitrate: video bitrate floor in kbps before 720p rescue (default: 500)
+# max_retries: max retry attempts per resolution pass (default: 3)
+# crf_rescue_value: CRF quality value for Phase 3 rescue pass (default: 28)
+# no_cleanup: preserve logs and intermediate pass files (true/false, default: false)
+output_dir = optimized
+min_video_bitrate = 500
+max_retries = 3
+crf_rescue_value = 28
+no_cleanup = false
 ```
 
 Under `mode = hardware` each `hardware_order` entry is functionally probed at startup and the
 first that works wins -- so adding e.g. `h264_amf` to the list makes it selectable.
+
+**Available Configuration Keys:**
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mode` | string | `software` | Default encoder selection mode (`software`, `hardware`, `software_x264`). |
+| `hardware_order` | string | *(list)* | Space-separated ordered list of hardware encoders to probe. |
+| `software_order` | string | `libx265 libx264` | Space-separated fallback order for software encoders. |
+| `target_size_mb` | float | `19.8` | Target file size in MB (19.8MB fits within Discord 20MB cap). |
+| `preset` | string | `slow` | Compression speed preset (mapped automatically for GPU encoders). |
+| `normalize_audio` | boolean | `false` | Apply EBU R128 (-16 LUFS) two-pass loudness normalization. |
+| `mono` | boolean | `false` | Downmix audio to mono to conserve bitrate budget. |
+| `no_audio` | boolean | `false` | Strip audio completely (`-an`) to maximize video bitrate. |
+| `audio_bitrate` | int | `192` | Initial audio bitrate in kbps. |
+| `min_audio_bitrate` | int | `64` | Minimum audio bitrate floor in kbps before giving up audio budget. |
+| `output_dir` | string | `optimized` | Output folder path for compressed videos. |
+| `min_video_bitrate` | int | `500` | Minimum video bitrate floor in kbps before triggering 720p downscale. |
+| `max_retries` | int | `3` | Maximum retry attempts per resolution pass. |
+| `crf_rescue_value` | int | `28` | CRF quality target for Phase 3 rescue pass. |
+| `no_cleanup` | boolean | `false` | Preserve 2-pass log files and intermediate passes for inspection. |
 
 **Location:** the script directory is used first; if it isn't writable (e.g. a system-wide
 install), the file falls back to a per-user path -- `$XDG_CONFIG_HOME/ffmpeg-shrinkwrap/` (or
