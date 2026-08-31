@@ -5,9 +5,17 @@
 
 $ErrorActionPreference = "Stop"
 
-# FFmpeg download sources (primary + fallback)
-$FFmpegURL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-$FFmpegGitHubURL = "https://github.com/GyanD/codexffmpeg/releases/latest/download/ffmpeg-release-essentials.zip"
+# --- Pinned FFmpeg release (supply-chain integrity) ---
+# We pin a specific, immutable build and verify its SHA-256 before extracting, instead of
+# blindly trusting whatever "latest" returns. The hash below is gyan.dev's published
+# checksum for this exact essentials build.
+# TO BUMP THE VERSION: change $FFmpegVersion AND replace $ExpectedSha256 with the new
+# value from https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-<ver>-essentials_build.zip.sha256
+$FFmpegVersion  = "8.1.1"
+$ExpectedSha256 = "6F58CE889F59C311410F7D2B18895B33C03456463486F3B1EBC93D97A0F54541"
+# Primary: gyan.dev versioned package. Fallback: GitHub release asset (same immutable build).
+$FFmpegURL       = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-$FFmpegVersion-essentials_build.zip"
+$FFmpegGitHubURL = "https://github.com/GyanD/codexffmpeg/releases/download/$FFmpegVersion/ffmpeg-$FFmpegVersion-essentials_build.zip"
 $DownloadPath = Join-Path $PSScriptRoot "ffmpeg-essentials.zip"
 $ExtractPath = Join-Path $PSScriptRoot "ffmpeg-temp"
 
@@ -27,7 +35,7 @@ if ((Test-Path (Join-Path $PSScriptRoot "ffmpeg.exe")) -and
     (Test-Path (Join-Path $PSScriptRoot "ffprobe.exe"))) {
     Write-Host "[OK] FFmpeg is already installed!" -ForegroundColor Green
     Write-Host ""
-    Write-Host "You can now use drag_video_here.bat or run:" -ForegroundColor White
+    Write-Host "You can now use drag_videos_here.bat or run:" -ForegroundColor White
     Write-Host "  .\shrinkwrap.ps1" -ForegroundColor Yellow
     Write-Host ""
     Read-Host "Press Enter to exit"
@@ -39,7 +47,7 @@ Write-Host ""
 
 # Download FFmpeg
 try {
-    Write-Host "[1/4] Downloading FFmpeg (~100MB)..." -ForegroundColor Cyan
+    Write-Host "[1/4] Downloading FFmpeg $FFmpegVersion (~100MB)..." -ForegroundColor Cyan
     Write-Host "      Primary: gyan.dev (official FFmpeg build provider)" -ForegroundColor Gray
     
     # Try primary source first
@@ -77,6 +85,27 @@ try {
     Write-Host ""
     Write-Host "Then extract ffmpeg.exe and ffprobe.exe to:" -ForegroundColor Yellow
     Write-Host "  $PSScriptRoot" -ForegroundColor Cyan
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+
+# Verify integrity before trusting the archive (pinned SHA-256)
+try {
+    Write-Host "[1.5/4] Verifying SHA-256 checksum..." -ForegroundColor Cyan
+    $ActualSha256 = (Get-FileHash -Path $DownloadPath -Algorithm SHA256).Hash
+    if ($ActualSha256 -ne $ExpectedSha256) {
+        Write-Host "[ERROR] Checksum mismatch! The download may be corrupted or tampered with." -ForegroundColor Red
+        Write-Host "        Expected: $ExpectedSha256" -ForegroundColor Yellow
+        Write-Host "        Actual:   $ActualSha256" -ForegroundColor Yellow
+        Write-Host "        Aborting and deleting the file for safety." -ForegroundColor Yellow
+        Remove-Item $DownloadPath -Force -ErrorAction SilentlyContinue
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
+    Write-Host "      Checksum verified (FFmpeg $FFmpegVersion)." -ForegroundColor Green
+} catch {
+    Write-Host "[ERROR] Could not compute checksum: $_" -ForegroundColor Red
+    Remove-Item $DownloadPath -Force -ErrorAction SilentlyContinue
     Read-Host "Press Enter to exit"
     exit 1
 }
@@ -191,8 +220,8 @@ Write-Host "  Setup Complete!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "You can now use:" -ForegroundColor White
-Write-Host "  - Drag videos onto drag_video_here.bat" -ForegroundColor Cyan
-Write-Host "  - Double-click drag_video_here.bat" -ForegroundColor Cyan
+Write-Host "  - Drag videos onto drag_videos_here.bat" -ForegroundColor Cyan
+Write-Host "  - Double-click drag_videos_here.bat" -ForegroundColor Cyan
 Write-Host "  - Run .\shrinkwrap.ps1 directly" -ForegroundColor Cyan
 Write-Host ""
 

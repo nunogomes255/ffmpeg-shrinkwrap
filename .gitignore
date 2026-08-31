@@ -6,7 +6,14 @@ optimized/
 *_PART_*.mp4
 *_error_*.txt
 optimization_summary.txt
+optimization_summary.csv
+
+# User-generated encoder preferences (written by --config / -Config)
+shrinkwrap.conf
+ffmpeg.exe
+ffprobe.exe
+ffmpeg-essentials.zip
+ffmpeg-temp/
 .DS_Store
 Thumbs.db
-cat_ALL.sh
 *.txt

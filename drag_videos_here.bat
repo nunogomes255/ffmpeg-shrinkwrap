@@ -1,5 +1,10 @@
 @echo off
-setlocal EnableDelayedExpansion
+:: NOTE: plain 'setlocal' (NOT EnableDelayedExpansion) -- delayed expansion mangles
+:: dragged paths containing '!' (e.g. clip!.mp4). Args are forwarded verbatim via %*.
+setlocal
+:: Switch the console to UTF-8 so the PowerShell stage's Unicode UI (rules, checkmarks,
+:: progress glyphs) renders instead of showing mojibake on the default code page.
+chcp 65001 >nul
 cd /d "%~dp0"
 
 title FFmpeg Shrinkwrap - Discord Video Compressor
@@ -10,7 +15,7 @@ title FFmpeg Shrinkwrap - Discord Video Compressor
 echo.
 echo ========================================
 echo   FFmpeg Shrinkwrap v1.0
-echo   Compress videos for Discord (10MB)
+echo   Compress videos for Discord (20MB)
 echo ========================================
 echo.
 
